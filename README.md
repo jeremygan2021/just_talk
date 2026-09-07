@@ -12,12 +12,16 @@ Just Talk 是一个面向桌面环境的语音输入工具。它通过全局快�
 
 ## 功能
 
-- 全局快捷键录音，支持 `toggle` 和 `hold` 两种模式。
+- 全局快捷键录音，支持 `toggle`、`hold` 和 `press` 三种模式：
+  - `toggle`：按一次开始，再按一次停止。
+  - `hold`：按住录音，松手停止。
+  - `press`：短按开始录音，再短按一次停止并走 LLM 润色后上屏；长按（默认 300ms）按住录音、松手直接上屏原文，不经 LLM。
 - 语音热键限定为适合作为全局快捷键的按键：支持纯修饰键、功能键、Tab、CapsLock、方向键和导航键等；不支持字母、数字、标点、空格等普通字符键。
 - 豆包大模型流式 ASR，支持双向流优化版和二遍识别。
+- 可选的 OpenAI 兼容 LLM 润色（`[llm]`）：在 `press` 模式下，短按录音结果会先送 LLM 改写再上屏；LLM 调用失败时回退到上屏原文并提示。
 - 自动复制到剪贴板，支持自动上屏。
 - Wayland / X11 / macOS 顶层录音状态胶囊提示。
-- TUI 配置界面，支持热键、模式、自动上屏、停止延迟、热词等配置。
+- TUI 配置界面，支持热键、模式、自动上屏、停止延迟、热词、LLM 等配置；热键字段支持 `c` 直接录制组合键，无需手动输入。
 - 热词增强识别，适合项目名、人名、英文术语和专有名词。
 - 录音历史统计，包括历史次数、总字数、平均速度和最近速度。
 
@@ -133,6 +137,25 @@ macOS 热键写法：
 push_to_talk = "Option+Command"
 ```
 
+`press` 模式配置示例：
+
+```toml
+[voice]
+mode = "press"
+push_to_talk = "Alt+Super"
+long_press_ms = 300
+
+[llm]
+enabled = true
+base_url = "https://api.openai.com/v1"
+model = "gpt-4o-mini"
+api_key = "sk-..."
+# system_prompt 留空时使用默认的中文口语 → 书面语润色指令
+timeout_ms = 8000
+```
+
+按一次 `Alt+Super`（< 300ms）开始录音，再按一次停止，文本会自动走 LLM 润色后上屏；按住 `Alt+Super` 超过 300ms 会切到普通 ASR 上屏原文。LLM 任何失败（超时、4xx/5xx、网络）都会回退到原始 ASR 文本上屏，并在 overlay / TUI 日志里给出一次提示。
+
 ## 更新日志
 
 见 [CHANGELOG.md](CHANGELOG.md)。
@@ -146,3 +169,4 @@ Just Talk 由 `whoamihappyhacking` 维护。
 ## 许可证
 
 Just Talk 使用 GNU General Public License v3.0 开源。
+# just_talk
