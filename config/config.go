@@ -58,24 +58,23 @@ type VoiceConfig struct {
 	// endpoint use different auth schemes.
 	DoubaoAPIKey     string `toml:"doubao_api_key"`
 	DoubaoResourceID string `toml:"doubao_resource_id"`
-	// TripleTapSend enables the "quickly tap the voice hotkey three times
-	// while idle to press Enter" gesture. It is meant for chat/coding
-	// workflows where auto-submit pastes the text and the user wants to send
-	// it without reaching for the keyboard.
-	TripleTapSend bool `toml:"triple_tap_send"`
-	// TripleTapMs is the maximum gap (milliseconds) allowed between
+	// DoubleTapSend enables the "quickly tap the voice hotkey twice while
+	// idle to press Enter" gesture. Enter is the most frequent action, so it
+	// gets the easier double tap.
+	DoubleTapSend bool `toml:"double_tap_send"`
+	// TripleTapUndo enables the "quickly tap the voice hotkey three times
+	// while idle to retract the just-pasted text" gesture.
+	TripleTapUndo bool `toml:"triple_tap_undo"`
+	// UndoAction selects what the triple-tap retract sends: "undo" presses
+	// Ctrl+Z, "clear" selects all and deletes (Ctrl+A then Backspace).
+	// Empty uses "undo".
+	UndoAction string `toml:"undo_action"`
+	// MultiTapMs is the maximum gap (milliseconds) allowed between
 	// consecutive hotkey taps for them to count as one multi-tap gesture
-	// (double or triple). The window is clamped to StopDelayMs so a gesture
-	// always completes before the recording stop delay fires. Empty/zero
-	// uses the default.
-	TripleTapMs int `toml:"triple_tap_ms"`
-	// DoubleTapUndo enables the "quickly tap the voice hotkey twice while
-	// idle to retract the just-pasted text" gesture.
-	DoubleTapUndo bool `toml:"double_tap_undo"`
-	// DoubleTapAction selects what the double-tap gesture sends: "undo"
-	// presses Ctrl+Z, "clear" selects all and deletes (Ctrl+A then
-	// Backspace). Empty uses "undo".
-	DoubleTapAction string `toml:"double_tap_action"`
+	// (double or triple). The window is clamped below StopDelayMs so a
+	// gesture always completes before the recording stop delay fires.
+	// Empty/zero uses the default.
+	MultiTapMs int `toml:"multi_tap_ms"`
 }
 
 // LLMConfig configures an optional OpenAI-compatible chat backend used to
@@ -96,8 +95,8 @@ func Default() *Config {
 		Voice: VoiceConfig{
 			Enabled: true, Mode: "toggle", PushToTalk: "Alt+Super",
 			Language: "zh-CN", AutoSubmit: true, ResourceID: "volc.bigasr.sauc.duration",
-			ASRBackend: "online", TripleTapSend: true, TripleTapMs: 500,
-			DoubleTapUndo: true, DoubleTapAction: "undo",
+			ASRBackend: "online", DoubleTapSend: true, TripleTapUndo: true,
+			MultiTapMs: 500, UndoAction: "undo",
 		},
 		Overlay: OverlayConfig{
 			Enabled: true, Position: "bottom-center", IdleVisible: false, Scale: 1.0,
@@ -260,17 +259,17 @@ func NormalizeMode(mode string) (string, error) {
 	}
 }
 
-// NormalizeDoubleTapAction returns the recognized double-tap action and an
+// NormalizeUndoAction returns the recognized triple-tap retract action and an
 // empty error, or ("", err) for unknown values. Empty input defaults to
 // "undo".
-func NormalizeDoubleTapAction(action string) (string, error) {
+func NormalizeUndoAction(action string) (string, error) {
 	switch action {
 	case "", "undo":
 		return "undo", nil
 	case "clear":
 		return "clear", nil
 	default:
-		return "", fmt.Errorf("unknown double_tap_action %q (expected undo/clear)", action)
+		return "", fmt.Errorf("unknown undo_action %q (expected undo/clear)", action)
 	}
 }
 

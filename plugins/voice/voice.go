@@ -22,12 +22,12 @@ import (
 
 const (
 	defaultStopDelayMs = 800
-	defaultTripleTapMs = 500
+	defaultMultiTapMs  = 500
 	errorHoldDuration  = 10 * time.Second
-	// enterHintDuration is how long the overlay keeps showing the Enter
-	// hint after a triple-tap has fired.
-	enterHintDuration = 1200 * time.Millisecond
-	// undoTapActionUndo / undoTapActionClear select the double-tap payload.
+	// gestureHintDuration is how long the overlay keeps showing the Enter or
+	// retract hint after a multi-tap gesture has fired.
+	gestureHintDuration = 1200 * time.Millisecond
+	// undoTapActionUndo / undoTapActionClear select the retract payload.
 	undoTapActionUndo  = "undo"
 	undoTapActionClear = "clear"
 )
@@ -307,14 +307,14 @@ type VoicePlugin struct {
 	flowActive             bool
 	cancelHotkeyRegistered bool
 	retryHotkeyRegistered  bool
-	tripleTapSend          bool
-	tripleTapWindow        time.Duration
+	doubleTapSend          bool
+	multiTapWindow         time.Duration
 	tapCount               int
 	lastTapAt              time.Time
 	tapKeyDown             bool
 	enterUntil             time.Time
-	doubleTapUndo          bool
-	doubleTapAction        string
+	tripleTapUndo          bool
+	undoAction             string
 	doubleTimer            *time.Timer
 	undoUntil              time.Time
 }
@@ -399,22 +399,22 @@ func (p *VoicePlugin) registerFromConfig(cfg *config.Config) error {
 	if stopDelayMs <= 0 {
 		stopDelayMs = defaultStopDelayMs
 	}
-	tripleTapMs := vc.TripleTapMs
-	if tripleTapMs <= 0 {
-		tripleTapMs = defaultTripleTapMs
+	multiTapMs := vc.MultiTapMs
+	if multiTapMs <= 0 {
+		multiTapMs = defaultMultiTapMs
 	}
-	tripleTapWindow := time.Duration(tripleTapMs) * time.Millisecond
+	multiTapWindow := time.Duration(multiTapMs) * time.Millisecond
 	// Keep the multi-tap window comfortably inside the stop delay so the
 	// accidental recording started by the first tap is still active (and
 	// cancelable) when the gesture completes. The margin also stops a
 	// confirmed double-tap from racing the stop-delay timer.
-	if stopDelay := time.Duration(stopDelayMs) * time.Millisecond; tripleTapWindow > stopDelay-150*time.Millisecond {
-		tripleTapWindow = stopDelay - 150*time.Millisecond
+	if stopDelay := time.Duration(stopDelayMs) * time.Millisecond; multiTapWindow > stopDelay-150*time.Millisecond {
+		multiTapWindow = stopDelay - 150*time.Millisecond
 	}
-	if tripleTapWindow < 100*time.Millisecond {
-		tripleTapWindow = 100 * time.Millisecond
+	if multiTapWindow < 100*time.Millisecond {
+		multiTapWindow = 100 * time.Millisecond
 	}
-	doubleTapAction, err := config.NormalizeDoubleTapAction(vc.DoubleTapAction)
+	undoAction, err := config.NormalizeUndoAction(vc.UndoAction)
 	if err != nil {
 		return err
 	}
@@ -427,10 +427,10 @@ func (p *VoicePlugin) registerFromConfig(cfg *config.Config) error {
 	p.mode = mode
 	p.autoSubmit = vc.AutoSubmit
 	p.stopDelayMs = stopDelayMs
-	p.tripleTapSend = vc.TripleTapSend
-	p.tripleTapWindow = tripleTapWindow
-	p.doubleTapUndo = vc.DoubleTapUndo
-	p.doubleTapAction = doubleTapAction
+	p.doubleTapSend = vc.DoubleTapSend
+	p.multiTapWindow = multiTapWindow
+	p.tripleTapUndo = vc.TripleTapUndo
+	p.undoAction = undoAction
 	p.cancelDoubleTimerLocked()
 	p.tapCount = 0
 	p.tapKeyDown = false
@@ -438,8 +438,8 @@ func (p *VoicePlugin) registerFromConfig(cfg *config.Config) error {
 
 	p.logger.Info("config_reloaded", "hotkey", combo, "mode", mode,
 		"auto_submit", vc.AutoSubmit, "stop_delay_ms", stopDelayMs,
-		"triple_tap_send", vc.TripleTapSend, "triple_tap_ms", tripleTapMs,
-		"double_tap_undo", vc.DoubleTapUndo, "double_tap_action", doubleTapAction)
+		"double_tap_send", vc.DoubleTapSend, "triple_tap_undo", vc.TripleTapUndo,
+		"undo_action", undoAction, "multi_tap_ms", multiTapMs)
 
 	if !sameRegistration {
 		isOld := oldCombo.Key != hotkey.KeyNone || oldCombo.Mods != hotkey.ModNone
@@ -517,13 +517,13 @@ func (p *VoicePlugin) handleHotkey(evt hotkey.Event) {
 	p.mu.Unlock()
 
 	if gesture == tapTriple {
-		p.logger.Debug("voice triple-tap detected: sending enter")
-		p.triggerEnterSend()
+		p.logger.Debug("voice triple-tap detected: sending retract")
+		p.triggerUndoSend()
 		return
 	}
-	// A double-tap is armed by noteTapLocked but only fires from a timer once
-	// the triple-tap window closes, so the taps below still get their normal
-	// hold/toggle handling until then.
+	// A double-tap (Enter) is armed by noteTapLocked but only fires from a
+	// timer once the multi-tap window closes, so the taps below still get
+	// their normal hold/toggle handling until then.
 
 	p.logger.Debug("voice hotkey handling", "type", evt.Type, "mode", mode, "recording", rec, "stopping", stopping)
 	switch mode {
@@ -574,7 +574,7 @@ const (
 // turn it into a triple-tap. It is therefore armed as a timer that fires when
 // the window closes (see fireDoubleTap).
 func (p *VoicePlugin) noteTapLocked(now time.Time) tapGesture {
-	if p.tripleTapWindow <= 0 || (!p.tripleTapSend && !p.doubleTapUndo) {
+	if p.multiTapWindow <= 0 || (!p.doubleTapSend && !p.tripleTapUndo) {
 		return tapNone
 	}
 	idle := !p.recording && !p.stopping && p.pendingDone == 0 && p.outputInFlight == 0 &&
@@ -587,7 +587,7 @@ func (p *VoicePlugin) noteTapLocked(now time.Time) tapGesture {
 		p.lastTapAt = now
 		return tapNone
 	}
-	if now.Sub(p.lastTapAt) > p.tripleTapWindow {
+	if now.Sub(p.lastTapAt) > p.multiTapWindow {
 		p.cancelDoubleTimerLocked()
 		p.tapCount = 0
 		return p.noteTapLocked(now)
@@ -596,14 +596,16 @@ func (p *VoicePlugin) noteTapLocked(now time.Time) tapGesture {
 	p.tapCount++
 	switch {
 	case p.tapCount == 2:
-		if p.doubleTapUndo {
+		// Double tap means Enter. It cannot fire yet because a third tap
+		// would turn it into the retract gesture, so arm a timer instead.
+		if p.doubleTapSend {
 			p.armDoubleTapLocked()
 		}
 		return tapNone
 	case p.tapCount >= 3:
 		p.cancelDoubleTimerLocked()
 		p.tapCount = 0
-		if p.tripleTapSend {
+		if p.tripleTapUndo {
 			return tapTriple
 		}
 		return tapNone
@@ -611,14 +613,14 @@ func (p *VoicePlugin) noteTapLocked(now time.Time) tapGesture {
 	return tapNone
 }
 
-// armDoubleTapLocked schedules the retract action for when the triple-tap
-// window closes without a third press.
+// armDoubleTapLocked schedules the Enter action for when the multi-tap window
+// closes without a third press.
 func (p *VoicePlugin) armDoubleTapLocked() {
 	p.cancelDoubleTimerLocked()
-	if p.tripleTapWindow <= 0 {
+	if p.multiTapWindow <= 0 {
 		return
 	}
-	p.doubleTimer = time.AfterFunc(p.tripleTapWindow, p.fireDoubleTap)
+	p.doubleTimer = time.AfterFunc(p.multiTapWindow, p.fireDoubleTap)
 }
 
 func (p *VoicePlugin) cancelDoubleTimerLocked() {
@@ -630,7 +632,7 @@ func (p *VoicePlugin) cancelDoubleTimerLocked() {
 
 // fireDoubleTap runs once the double-tap is confirmed (no third tap arrived).
 // It discards the recording started by the first tap, flashes the overlay
-// retract hint, and injects the configured retract keys.
+// Enter hint, and presses Enter in the focused window.
 func (p *VoicePlugin) fireDoubleTap() {
 	p.mu.Lock()
 	if p.tapCount != 2 {
@@ -642,31 +644,7 @@ func (p *VoicePlugin) fireDoubleTap() {
 	p.doubleTimer = nil
 	p.tapCount = 0
 	session := p.detachRecordingLocked()
-	action := p.doubleTapAction
-	p.undoUntil = time.Now().Add(enterHintDuration)
-	p.publishStatusLocked()
-	p.mu.Unlock()
-
-	if session != nil {
-		go p.discardRecordingSession(session)
-	}
-	pout("↶ 撤回输入")
-	go func() {
-		if err := sendUndoInput(action, p.logger); err != nil {
-			pout("❌ 撤回失败: %v", err)
-		}
-	}()
-}
-
-// triggerEnterSend discards any recording the first two taps may have
-// started, flashes the overlay Enter hint, and presses Enter in the focused
-// window.
-func (p *VoicePlugin) triggerEnterSend() {
-	p.mu.Lock()
-	p.cancelDoubleTimerLocked()
-	session := p.detachRecordingLocked()
-	p.enterUntil = time.Now().Add(enterHintDuration)
-	p.tapCount = 0
+	p.enterUntil = time.Now().Add(gestureHintDuration)
 	p.publishStatusLocked()
 	p.mu.Unlock()
 
@@ -677,6 +655,29 @@ func (p *VoicePlugin) triggerEnterSend() {
 	go func() {
 		if err := sendEnterKey(p.logger); err != nil {
 			pout("❌ 回车发送失败: %v", err)
+		}
+	}()
+}
+
+// triggerUndoSend discards any recording the earlier taps may have started,
+// flashes the overlay retract hint, and injects the configured retract keys.
+func (p *VoicePlugin) triggerUndoSend() {
+	p.mu.Lock()
+	p.cancelDoubleTimerLocked()
+	session := p.detachRecordingLocked()
+	action := p.undoAction
+	p.undoUntil = time.Now().Add(gestureHintDuration)
+	p.tapCount = 0
+	p.publishStatusLocked()
+	p.mu.Unlock()
+
+	if session != nil {
+		go p.discardRecordingSession(session)
+	}
+	pout("↶ 撤回输入")
+	go func() {
+		if err := sendUndoInput(action, p.logger); err != nil {
+			pout("❌ 撤回失败: %v", err)
 		}
 	}()
 }

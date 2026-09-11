@@ -18,7 +18,7 @@ Just Talk 是一个面向桌面环境的语音输入工具。它通过全局快�
 - 语音热键限定为适合作为全局快捷键的按键：支持纯修饰键、功能键、Tab、CapsLock、方向键和导航键等；不支持字母、数字、标点、空格等普通字符键。
 - 豆包大模型 ASR，支持三种后端：`doubao_url`（推荐，文件 URL/Base64 上传，单 token `x-api-key`）、`online`（流式 WebSocket，需 AppKey+AccessKey）、`offline`（本地 SenseVoice，无需联网）。
 - 自动复制到剪贴板，支持自动上屏。
-- 多击手势（默认开启）：空闲时快速按两次语音热键 = **撤回输入**（默认 `Ctrl+Z` 撤销刚上屏的文字，可配置为 `Ctrl+A`+`Backspace` 清空），快速按三次 = **发送回车**（Enter），方便在聊天、写代码时“说完即撤 / 说完即发送”。手势触发时 overlay 会短暂显示 `↶` 撤回箭头 / `⏎` 回车箭头替代录音圆点。可分别用 `double_tap_undo`、`triple_tap_send` 关闭；`triple_tap_ms` 调整判定间隔。正在录音、等待识别或正在上屏时不会触发。
+- 多击手势（默认开启）：空闲时快速按两次语音热键 = **发送回车**（Enter，最常用所以放在更容易的双击上），快速按三次 = **撤回输入**（默认 `Ctrl+Z` 撤销刚上屏的文字，可配置为 `Ctrl+A`+`Backspace` 清空），方便在聊天、写代码时“说完即发送 / 说完即撤”。手势触发时 overlay 会短暂显示 `⏎` 回车箭头 / `↶` 撤回箭头替代录音圆点。可分别用 `double_tap_send`、`triple_tap_undo` 关闭；`multi_tap_ms` 调整判定间隔。正在录音、等待识别或正在上屏时不会触发。
 - Wayland / X11 / macOS 顶层录音状态胶囊提示。
 - TUI 配置界面，支持热键、模式、自动上屏、停止延迟、热词、LLM 等配置；热键字段支持 `c` 直接录制组合键，无需手动输入。
 - 热词增强识别，适合项目名、人名、英文术语和专有名词。
@@ -128,18 +128,18 @@ push_to_talk = "Alt+Super"
 hotwords = ["Wayland", "Sway", "wl-copy", "wtype", "just-talk-go"]
 ```
 
-三击回车 / 双击撤回示例（默认开启）：
+双击回车 / 三击撤回示例（默认开启）：
 
 ```toml
 [voice]
-# 空闲时快速按三次热键 → 发送回车
-triple_tap_send = true
-# 空闲时快速按两次热键 → 撤回上屏内容
-double_tap_undo = true
+# 空闲时快速按两次热键 → 发送回车（最常用）
+double_tap_send = true
+# 空闲时快速按三次热键 → 撤回上屏内容
+triple_tap_undo = true
 # 撤回动作: undo = Ctrl+Z 撤销; clear = Ctrl+A 后 Backspace 清空
-double_tap_action = "undo"
+undo_action = "undo"
 # 双击/三击判定最大按键间隔（毫秒），会自动收敛到小于 stop_delay_ms
-triple_tap_ms = 500
+multi_tap_ms = 500
 ```
 
 `doubao_url` 后端配置（推荐，使用 `volc.seedasr.auc` 单 token）：

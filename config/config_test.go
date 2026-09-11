@@ -2,27 +2,23 @@ package config
 
 import "testing"
 
-func TestDefaultTripleTap(t *testing.T) {
+func TestDefaultMultiTap(t *testing.T) {
 	cfg := Default()
-	if !cfg.Voice.TripleTapSend {
-		t.Fatal("TripleTapSend should default to true")
+	if !cfg.Voice.DoubleTapSend {
+		t.Fatal("DoubleTapSend should default to true")
 	}
-	if cfg.Voice.TripleTapMs != 500 {
-		t.Fatalf("TripleTapMs = %d, want 500", cfg.Voice.TripleTapMs)
+	if !cfg.Voice.TripleTapUndo {
+		t.Fatal("TripleTapUndo should default to true")
+	}
+	if cfg.Voice.MultiTapMs != 500 {
+		t.Fatalf("MultiTapMs = %d, want 500", cfg.Voice.MultiTapMs)
+	}
+	if cfg.Voice.UndoAction != "undo" {
+		t.Fatalf("UndoAction = %q, want undo", cfg.Voice.UndoAction)
 	}
 }
 
-func TestDefaultDoubleTap(t *testing.T) {
-	cfg := Default()
-	if !cfg.Voice.DoubleTapUndo {
-		t.Fatal("DoubleTapUndo should default to true")
-	}
-	if cfg.Voice.DoubleTapAction != "undo" {
-		t.Fatalf("DoubleTapAction = %q, want undo", cfg.Voice.DoubleTapAction)
-	}
-}
-
-func TestNormalizeDoubleTapAction(t *testing.T) {
+func TestNormalizeUndoAction(t *testing.T) {
 	cases := []struct {
 		in   string
 		want string
@@ -35,18 +31,18 @@ func TestNormalizeDoubleTapAction(t *testing.T) {
 		{"UNDO", "", true},
 	}
 	for _, tc := range cases {
-		got, err := NormalizeDoubleTapAction(tc.in)
+		got, err := NormalizeUndoAction(tc.in)
 		if tc.err {
 			if err == nil {
-				t.Errorf("NormalizeDoubleTapAction(%q): expected error, got %q", tc.in, got)
+				t.Errorf("NormalizeUndoAction(%q): expected error, got %q", tc.in, got)
 			}
 			continue
 		}
 		if err != nil {
-			t.Errorf("NormalizeDoubleTapAction(%q): unexpected error %v", tc.in, err)
+			t.Errorf("NormalizeUndoAction(%q): unexpected error %v", tc.in, err)
 		}
 		if got != tc.want {
-			t.Errorf("NormalizeDoubleTapAction(%q) = %q, want %q", tc.in, got, tc.want)
+			t.Errorf("NormalizeUndoAction(%q) = %q, want %q", tc.in, got, tc.want)
 		}
 	}
 }

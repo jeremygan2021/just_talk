@@ -19,10 +19,10 @@ func testVoicePlugin() *VoicePlugin {
 	return &VoicePlugin{logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
 }
 
-func TestTripleTapDetectedWhenIdle(t *testing.T) {
+func TestTripleTapRetractsWhenIdle(t *testing.T) {
 	p := testVoicePlugin()
-	p.tripleTapSend = true
-	p.tripleTapWindow = 500 * time.Millisecond
+	p.tripleTapUndo = true
+	p.multiTapWindow = 500 * time.Millisecond
 	base := time.Now()
 	if got := p.noteTapLocked(base); got != tapNone {
 		t.Fatal("first tap should not complete a gesture")
@@ -40,8 +40,8 @@ func TestTripleTapDetectedWhenIdle(t *testing.T) {
 
 func TestTripleTapContinuesAfterFirstTapStartsRecording(t *testing.T) {
 	p := testVoicePlugin()
-	p.tripleTapSend = true
-	p.tripleTapWindow = 500 * time.Millisecond
+	p.tripleTapUndo = true
+	p.multiTapWindow = 500 * time.Millisecond
 	base := time.Now()
 	p.noteTapLocked(base) // idle at sequence start
 	p.recording = true    // the first tap started a recording
@@ -53,7 +53,7 @@ func TestTripleTapContinuesAfterFirstTapStartsRecording(t *testing.T) {
 
 func TestTripleTapDisabled(t *testing.T) {
 	p := testVoicePlugin()
-	p.tripleTapWindow = 500 * time.Millisecond
+	p.multiTapWindow = 500 * time.Millisecond
 	base := time.Now()
 	for i := 0; i < 3; i++ {
 		if got := p.noteTapLocked(base.Add(time.Duration(i) * 50 * time.Millisecond)); got != tapNone {
@@ -64,8 +64,8 @@ func TestTripleTapDisabled(t *testing.T) {
 
 func TestTripleTapIgnoredWhileRecording(t *testing.T) {
 	p := testVoicePlugin()
-	p.tripleTapSend = true
-	p.tripleTapWindow = 500 * time.Millisecond
+	p.tripleTapUndo = true
+	p.multiTapWindow = 500 * time.Millisecond
 	p.recording = true
 	base := time.Now()
 	for i := 0; i < 3; i++ {
@@ -80,8 +80,8 @@ func TestTripleTapIgnoredWhileRecording(t *testing.T) {
 
 func TestTripleTapIgnoredWhileFinishPending(t *testing.T) {
 	p := testVoicePlugin()
-	p.tripleTapSend = true
-	p.tripleTapWindow = 500 * time.Millisecond
+	p.tripleTapUndo = true
+	p.multiTapWindow = 500 * time.Millisecond
 	p.pendingDone = 1
 	base := time.Now()
 	for i := 0; i < 3; i++ {
@@ -93,8 +93,8 @@ func TestTripleTapIgnoredWhileFinishPending(t *testing.T) {
 
 func TestTripleTapIgnoredDuringError(t *testing.T) {
 	p := testVoicePlugin()
-	p.tripleTapSend = true
-	p.tripleTapWindow = 500 * time.Millisecond
+	p.tripleTapUndo = true
+	p.multiTapWindow = 500 * time.Millisecond
 	p.lastError = "boom"
 	p.errorUntil = time.Now().Add(time.Second)
 	base := time.Now()
@@ -107,11 +107,11 @@ func TestTripleTapIgnoredDuringError(t *testing.T) {
 
 func TestTripleTapSlowGapResets(t *testing.T) {
 	p := testVoicePlugin()
-	p.tripleTapSend = true
-	p.tripleTapWindow = 200 * time.Millisecond
+	p.tripleTapUndo = true
+	p.multiTapWindow = 200 * time.Millisecond
 	base := time.Now()
 	p.noteTapLocked(base)                             // tap 1
-	p.noteTapLocked(base.Add(100 * time.Millisecond)) // tap 2 (double is off, so no timer)
+	p.noteTapLocked(base.Add(100 * time.Millisecond)) // tap 2 (Enter is off, so no timer)
 	if got := p.noteTapLocked(base.Add(500 * time.Millisecond)); got != tapNone {
 		t.Fatal("slow third tap must not trigger")
 	}
@@ -120,17 +120,16 @@ func TestTripleTapSlowGapResets(t *testing.T) {
 	}
 }
 
-func TestDoubleTapFiresUndo(t *testing.T) {
+func TestDoubleTapFiresEnter(t *testing.T) {
 	p := testVoicePlugin()
-	p.doubleTapUndo = true
-	p.doubleTapAction = undoTapActionUndo
-	p.tripleTapWindow = 40 * time.Millisecond
+	p.doubleTapSend = true
+	p.multiTapWindow = 40 * time.Millisecond
 
-	origSend := sendUndoInput
-	defer func() { sendUndoInput = origSend }()
-	called := make(chan string, 1)
-	sendUndoInput = func(action string, _ *slog.Logger) error {
-		called <- action
+	origSend := sendEnterKey
+	defer func() { sendEnterKey = origSend }()
+	called := make(chan struct{}, 1)
+	sendEnterKey = func(*slog.Logger) error {
+		called <- struct{}{}
 		return nil
 	}
 	defer setTUIStatus(func(s *TUIVoiceStatus) { *s = TUIVoiceStatus{State: "idle", UpdatedAt: time.Now()} })
@@ -143,22 +142,19 @@ func TestDoubleTapFiresUndo(t *testing.T) {
 	}
 
 	select {
-	case action := <-called:
-		if action != undoTapActionUndo {
-			t.Fatalf("action = %q, want %q", action, undoTapActionUndo)
-		}
+	case <-called:
 	case <-time.After(time.Second):
-		t.Fatal("double-tap undo did not fire")
+		t.Fatal("double-tap Enter did not fire")
 	}
-	if status := TUIStatus(); status.State != "undo" {
-		t.Fatalf("state = %q, want undo", status.State)
+	if status := TUIStatus(); status.State != "enter" {
+		t.Fatalf("state = %q, want enter", status.State)
 	}
 }
 
 func TestDoubleTapDisabledDoesNotArm(t *testing.T) {
 	p := testVoicePlugin()
-	p.tripleTapSend = true
-	p.tripleTapWindow = 500 * time.Millisecond
+	p.tripleTapUndo = true
+	p.multiTapWindow = 500 * time.Millisecond
 	base := time.Now()
 	p.noteTapLocked(base)
 	p.noteTapLocked(base.Add(50 * time.Millisecond))
@@ -169,16 +165,18 @@ func TestDoubleTapDisabledDoesNotArm(t *testing.T) {
 
 func TestTripleTapCancelsArmedDouble(t *testing.T) {
 	p := testVoicePlugin()
-	p.doubleTapUndo = true
-	p.tripleTapSend = true
-	p.tripleTapWindow = 40 * time.Millisecond
+	p.doubleTapSend = true
+	p.tripleTapUndo = true
+	p.multiTapWindow = 40 * time.Millisecond
 
-	origSend := sendUndoInput
-	defer func() { sendUndoInput = origSend }()
-	sendUndoInput = func(string, *slog.Logger) error {
-		t.Error("undo must not fire once a third tap completes the triple")
+	origEnter := sendEnterKey
+	origUndo := sendUndoInput
+	defer func() { sendEnterKey = origEnter; sendUndoInput = origUndo }()
+	sendEnterKey = func(*slog.Logger) error {
+		t.Error("Enter must not fire once a third tap completes the triple")
 		return nil
 	}
+	sendUndoInput = func(string, *slog.Logger) error { return nil }
 
 	base := time.Now()
 	p.noteTapLocked(base)
@@ -194,13 +192,13 @@ func TestTripleTapCancelsArmedDouble(t *testing.T) {
 
 func TestFireDoubleTapIgnoresIncompleteSequence(t *testing.T) {
 	p := testVoicePlugin()
-	p.doubleTapUndo = true
-	p.tripleTapWindow = 50 * time.Millisecond
+	p.doubleTapSend = true
+	p.multiTapWindow = 50 * time.Millisecond
 
-	origSend := sendUndoInput
-	defer func() { sendUndoInput = origSend }()
-	sendUndoInput = func(string, *slog.Logger) error {
-		t.Error("undo must not fire without two taps")
+	origSend := sendEnterKey
+	defer func() { sendEnterKey = origSend }()
+	sendEnterKey = func(*slog.Logger) error {
+		t.Error("Enter must not fire without two taps")
 		return nil
 	}
 
@@ -211,30 +209,35 @@ func TestFireDoubleTapIgnoresIncompleteSequence(t *testing.T) {
 	}
 }
 
-func TestTriggerEnterSendSetsHintAndSends(t *testing.T) {
-	origSend := sendEnterKey
-	defer func() { sendEnterKey = origSend }()
-	called := make(chan struct{}, 1)
-	sendEnterKey = func(*slog.Logger) error {
-		called <- struct{}{}
+func TestTriggerUndoSendSetsHintAndSends(t *testing.T) {
+	p := testVoicePlugin()
+	p.undoAction = undoTapActionClear
+
+	origSend := sendUndoInput
+	defer func() { sendUndoInput = origSend }()
+	called := make(chan string, 1)
+	sendUndoInput = func(action string, _ *slog.Logger) error {
+		called <- action
 		return nil
 	}
 	defer setTUIStatus(func(s *TUIVoiceStatus) { *s = TUIVoiceStatus{State: "idle", UpdatedAt: time.Now()} })
 
-	p := testVoicePlugin()
-	p.triggerEnterSend()
+	p.triggerUndoSend()
 
 	select {
-	case <-called:
+	case action := <-called:
+		if action != undoTapActionClear {
+			t.Fatalf("action = %q, want %q", action, undoTapActionClear)
+		}
 	case <-time.After(time.Second):
-		t.Fatal("SendEnter was not called")
+		t.Fatal("SendUndo was not called")
 	}
 
 	status := TUIStatus()
-	if status.State != "enter" {
-		t.Fatalf("state = %q, want enter", status.State)
+	if status.State != "undo" {
+		t.Fatalf("state = %q, want undo", status.State)
 	}
-	if status.EnterUntil.IsZero() {
-		t.Fatal("EnterUntil should be set so the overlay shows the hint")
+	if status.UndoUntil.IsZero() {
+		t.Fatal("UndoUntil should be set so the overlay shows the hint")
 	}
 }

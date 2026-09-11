@@ -95,10 +95,10 @@ func New(cfg *config.Config) *Model {
 		{label: "豆包 API Key", key: "doubao_api_key", help: "doubao_url 后端: volc.seedasr.auc 的 x-api-key", fType: fString, input: ti(vc.DoubaoAPIKey)},
 		{label: "自动上屏", key: "auto_submit", help: "识别后自动粘贴", fType: fToggle, boolVal: vc.AutoSubmit},
 		{label: "停止延迟(ms)", key: "stop_delay_ms", help: "松手后补录毫秒", fType: fString, input: ti(fmt.Sprintf("%d", vc.StopDelayMs))},
-		{label: "双击撤回", key: "double_tap_undo", help: "空闲时快速按两次热键=撤回上屏内容", fType: fToggle, boolVal: vc.DoubleTapUndo},
-		{label: "双击动作", key: "double_tap_action", help: "undo=Ctrl+Z 撤销 / clear=Ctrl+A+Backspace 清空", fType: fSelect, opts: []string{"undo", "clear"}, optIdx: idxOf([]string{"undo", "clear"}, vc.DoubleTapAction)},
-		{label: "三击回车", key: "triple_tap_send", help: "空闲时快速按三次热键=发送回车", fType: fToggle, boolVal: vc.TripleTapSend},
-		{label: "多击间隔(ms)", key: "triple_tap_ms", help: "双击/三击判定最大按键间隔，应小于停止延迟", fType: fString, input: ti(fmt.Sprintf("%d", vc.TripleTapMs))},
+		{label: "双击回车", key: "double_tap_send", help: "空闲时快速按两次热键=发送回车", fType: fToggle, boolVal: vc.DoubleTapSend},
+		{label: "三击撤回", key: "triple_tap_undo", help: "空闲时快速按三次热键=撤回上屏内容", fType: fToggle, boolVal: vc.TripleTapUndo},
+		{label: "撤回动作", key: "undo_action", help: "undo=Ctrl+Z 撤销 / clear=Ctrl+A+Backspace 清空", fType: fSelect, opts: []string{"undo", "clear"}, optIdx: idxOf([]string{"undo", "clear"}, vc.UndoAction)},
+		{label: "多击间隔(ms)", key: "multi_tap_ms", help: "双击/三击判定最大按键间隔，应小于停止延迟", fType: fString, input: ti(fmt.Sprintf("%d", vc.MultiTapMs))},
 		{label: "热词", key: "hotwords", help: "逗号分隔术语", fType: fString, input: ti(strings.Join(vc.Hotwords, ", "))},
 	}
 	return &Model{cfg: cfg, fields: fs, logs: make([]string, 0, 100), cursor: -1, showLogs: true}
@@ -348,14 +348,14 @@ func (m *Model) save() {
 			vc.AutoSubmit = f.boolVal
 		case "stop_delay_ms":
 			fmt.Sscanf(f.input.Value(), "%d", &vc.StopDelayMs)
-		case "double_tap_undo":
-			vc.DoubleTapUndo = f.boolVal
-		case "double_tap_action":
-			vc.DoubleTapAction = f.opts[f.optIdx]
-		case "triple_tap_send":
-			vc.TripleTapSend = f.boolVal
-		case "triple_tap_ms":
-			fmt.Sscanf(f.input.Value(), "%d", &vc.TripleTapMs)
+		case "double_tap_send":
+			vc.DoubleTapSend = f.boolVal
+		case "triple_tap_undo":
+			vc.TripleTapUndo = f.boolVal
+		case "undo_action":
+			vc.UndoAction = f.opts[f.optIdx]
+		case "multi_tap_ms":
+			fmt.Sscanf(f.input.Value(), "%d", &vc.MultiTapMs)
 		case "hotwords":
 			vc.Hotwords = splitList(f.input.Value())
 		}
