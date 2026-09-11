@@ -58,6 +58,13 @@ type VoiceConfig struct {
 	// endpoint use different auth schemes.
 	DoubaoAPIKey     string `toml:"doubao_api_key"`
 	DoubaoResourceID string `toml:"doubao_resource_id"`
+	// DoubaoSubmitURL / DoubaoQueryURL override the default Doubao file
+	// recognition endpoints. Leave empty to use the public defaults at
+	// openspeech.bytedance.com. Useful for the China mainland gateway
+	// (openspeech.bytedance.com), or when proxying through a private
+	// deployment.
+	DoubaoSubmitURL string `toml:"doubao_submit_url"`
+	DoubaoQueryURL  string `toml:"doubao_query_url"`
 	// DoubleTapSend enables the "quickly tap the voice hotkey twice while
 	// idle to press Enter" gesture. Enter is the most frequent action, so it
 	// gets the easier double tap.

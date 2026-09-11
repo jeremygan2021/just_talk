@@ -176,8 +176,15 @@ func (c *URLASRClient) pollAndPublish(reqID string) {
 
 func (c *URLASRClient) submit(ctx context.Context, reqID, wavB64 string) error {
 	payload := map[string]interface{}{
-		"user":    map[string]string{"uid": "just-talk"},
-		"audio":   map[string]interface{}{"data": wavB64, "format": "wav", "codec": "raw"},
+		"user": map[string]string{"uid": "just-talk"},
+		"audio": map[string]interface{}{
+			"data":    wavB64,
+			"format":  "wav",
+			"codec":   "raw",
+			"rate":    16000,
+			"bits":    16,
+			"channel": 1,
+		},
 		"request": c.buildRequest(),
 	}
 	body, err := json.Marshal(payload)
@@ -193,9 +200,13 @@ func (c *URLASRClient) submit(ctx context.Context, reqID, wavB64 string) error {
 	req.Header.Set("X-Api-Resource-Id", c.cfg.ResourceID)
 	req.Header.Set("X-Api-Request-Id", reqID)
 	req.Header.Set("X-Api-Sequence", "-1")
+	c.logger.Debug("doubao url asr: submit request", "url", c.cfg.SubmitURL, "body_bytes", len(body))
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return err
+		// Wrap the underlying transport error with the submit URL so
+		// the user can tell at a glance whether DNS, TLS, or the
+		// remote peer dropped the connection.
+		return fmt.Errorf("submit %s: %w", c.cfg.SubmitURL, err)
 	}
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(resp.Body)
@@ -203,14 +214,19 @@ func (c *URLASRClient) submit(ctx context.Context, reqID, wavB64 string) error {
 	msg := resp.Header.Get("X-Api-Message")
 	if resp.StatusCode != http.StatusOK || (status != "" && status != "20000000") {
 		body := strings.TrimSpace(string(raw))
-		if len(body) > 256 {
-			body = body[:256] + "..."
+		// Keep the body intact up to 1 KB so an API-provided JSON
+		// error envelope survives into the log; truncate only after
+		// that to avoid blowing up the TUI log area.
+		const maxBody = 1024
+		if len(body) > maxBody {
+			body = body[:maxBody] + "...(truncated)"
 		}
 		if status == "" && resp.StatusCode != http.StatusOK {
 			return fmt.Errorf("submit http %d (no X-Api-Status-Code) msg=%s body=%s", resp.StatusCode, msg, body)
 		}
 		return fmt.Errorf("submit http %d status=%s msg=%s body=%s", resp.StatusCode, status, msg, body)
 	}
+	c.logger.Debug("doubao url asr: submit ok", "req_id", reqID, "status", status)
 	return nil
 }
 
@@ -225,7 +241,7 @@ func (c *URLASRClient) query(ctx context.Context, reqID string) (string, error) 
 	req.Header.Set("X-Api-Request-Id", reqID)
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("query %s: %w", c.cfg.QueryURL, err)
 	}
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(resp.Body)
@@ -233,8 +249,9 @@ func (c *URLASRClient) query(ctx context.Context, reqID string) (string, error) 
 		status := resp.Header.Get("X-Api-Status-Code")
 		msg := resp.Header.Get("X-Api-Message")
 		body := strings.TrimSpace(string(raw))
-		if len(body) > 256 {
-			body = body[:256] + "..."
+		const maxBody = 1024
+		if len(body) > maxBody {
+			body = body[:maxBody] + "...(truncated)"
 		}
 		return "", fmt.Errorf("query http %d status=%s msg=%s body=%s", resp.StatusCode, status, msg, body)
 	}
@@ -260,13 +277,15 @@ func (c *URLASRClient) query(ctx context.Context, reqID string) (string, error) 
 
 func (c *URLASRClient) buildRequest() map[string]interface{} {
 	r := map[string]interface{}{
-		"model_name":          "bigmodel",
-		"enable_itn":          true,
-		"enable_punc":         true,
-		"enable_ddc":          false,
-		"enable_speaker_info": false,
-		"show_utterances":     false,
-		"vad_segment":         false,
+		"model_name":            "bigmodel",
+		"enable_itn":            true,
+		"enable_punc":           true,
+		"enable_ddc":            false,
+		"enable_speaker_info":   false,
+		"enable_channel_split":  false,
+		"show_utterances":       false,
+		"vad_segment":           false,
+		"sensitive_words_filter": "",
 	}
 	if len(c.cfg.Hotwords) > 0 {
 		if ctx, err := hotwordsContext(c.cfg.Hotwords); err == nil && ctx != "" {

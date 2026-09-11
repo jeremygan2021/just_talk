@@ -852,6 +852,8 @@ func (p *VoicePlugin) newBackend(asrCfg ASRConfig) ASRBackend {
 			ResourceID: resourceID,
 			Language:   p.cfg.Voice.Language,
 			Hotwords:   p.cfg.Voice.Hotwords,
+			SubmitURL:  p.cfg.Voice.DoubaoSubmitURL,
+			QueryURL:   p.cfg.Voice.DoubaoQueryURL,
 		}, p.logger)
 	default:
 		return NewASRClient(asrCfg, p.logger)
