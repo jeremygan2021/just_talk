@@ -77,6 +77,16 @@ type TUIVoiceStatus struct {
 	EventQueueLen   int
 	EnterUntil      time.Time
 	UndoUntil       time.Time
+	// PartialText is the most recent non-final ASR text returned by the
+	// streaming backend. It is cleared once a final result is published
+	// or when the recording session ends. Only meaningful while state
+	// == "recording".
+	PartialText string
+	// LevelSamples is a copy of the most recent recorder amplitude
+	// samples in chronological order (oldest first, newest last). Each
+	// sample is a normalized peak in [0,1]. Used by the overlay to
+	// render a waveform next to the REC indicator.
+	LevelSamples []float32
 }
 
 type TUIVoiceStats struct {
@@ -805,6 +815,7 @@ func (p *VoicePlugin) startRecording() {
 	p.mu.Unlock() // Release lock before slow WebSocket dial
 
 	go p.connectASR(ctx, cancel, sessionID, sessionGen, rec, asrCfg)
+	go p.publishLevels(ctx, rec)
 	if shouldStopImmediately {
 		p.startStopDelay()
 	}
@@ -899,8 +910,14 @@ func (p *VoicePlugin) connectASR(ctx context.Context, cancel context.CancelFunc,
 			}
 			if result.IsFinal {
 				pout("\n🎤 最终: %s", result.Text)
+				setTUIStatus(func(s *TUIVoiceStatus) {
+					s.PartialText = ""
+				})
 			} else if result.Text != "" {
 				pout("\r🎤 %s", result.Text)
+				setTUIStatus(func(s *TUIVoiceStatus) {
+					s.PartialText = result.Text
+				})
 			}
 		}
 	}()
@@ -1305,6 +1322,7 @@ func (p *VoicePlugin) streamAudio(ctx context.Context, rec *Recorder, client ASR
 		}
 		n, err := rec.Read(buf)
 		if n > 0 {
+			rec.recordLevel(buf[:n])
 			client.SendAudio(ctx, buf[:n], false)
 		}
 		if err == io.EOF || (err != nil && ctx.Err() != nil) {
@@ -1313,6 +1331,36 @@ func (p *VoicePlugin) streamAudio(ctx context.Context, rec *Recorder, client ASR
 		if err != nil {
 			p.logger.Error("read audio error", "error", err)
 			return
+		}
+	}
+}
+
+// publishLevels copies the recorder's recent amplitude samples into
+// TUIVoiceStatus at ~30 Hz so the overlay can render a live waveform
+// alongside the REC indicator. The goroutine exits when ctx is
+// cancelled (recording session ended or was cancelled) and clears
+// the LevelSamples field so the overlay returns to its idle
+// rendering.
+func (p *VoicePlugin) publishLevels(ctx context.Context, rec *Recorder) {
+	ticker := time.NewTicker(33 * time.Millisecond)
+	defer ticker.Stop()
+	defer func() {
+		setTUIStatus(func(s *TUIVoiceStatus) {
+			s.LevelSamples = nil
+		})
+	}()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			samples := rec.Levels()
+			if rec.LevelCount() == 0 {
+				continue
+			}
+			setTUIStatus(func(s *TUIVoiceStatus) {
+				s.LevelSamples = samples
+			})
 		}
 	}
 }

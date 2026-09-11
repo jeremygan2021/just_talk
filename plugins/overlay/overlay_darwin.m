@@ -13,9 +13,13 @@
 	NSString *label;
 	NSColor *dotColor;
 	CGFloat scale;
+	BOOL wideMode;
+	float *waveformLevels;
+	int waveformCount;
 }
 - (void)setScaleValue:(CGFloat)newScale;
 - (void)setLabel:(NSString *)newLabel red:(CGFloat)r green:(CGFloat)g blue:(CGFloat)b;
+- (void)setLabel:(NSString *)newLabel red:(CGFloat)r green:(CGFloat)g blue:(CGFloat)b levels:(const float *)levels count:(int)n;
 @end
 
 @implementation JTOverlayView
@@ -25,12 +29,16 @@
 		label = [@"IDLE" retain];
 		dotColor = [[NSColor colorWithCalibratedRed:0.57 green:0.57 blue:0.57 alpha:1.0] retain];
 		scale = 1.0;
+		wideMode = NO;
+		waveformLevels = NULL;
+		waveformCount = 0;
 	}
 	return self;
 }
 - (void)dealloc {
 	[label release];
 	[dotColor release];
+	if (waveformLevels != NULL) free(waveformLevels);
 	[super dealloc];
 }
 - (BOOL)isOpaque { return NO; }
@@ -39,10 +47,29 @@
 	[self setNeedsDisplay:YES];
 }
 - (void)setLabel:(NSString *)newLabel red:(CGFloat)r green:(CGFloat)g blue:(CGFloat)b {
+	[self setLabel:newLabel red:r green:g blue:b levels:NULL count:0];
+}
+- (void)setLabel:(NSString *)newLabel red:(CGFloat)r green:(CGFloat)g blue:(CGFloat)b levels:(const float *)levels count:(int)n {
 	[label release];
 	label = [newLabel retain];
 	[dotColor release];
 	dotColor = [[NSColor colorWithCalibratedRed:r green:g blue:b alpha:1.0] retain];
+	if (waveformLevels != NULL) {
+		free(waveformLevels);
+		waveformLevels = NULL;
+		waveformCount = 0;
+	}
+	wideMode = (n > 0);
+	if (wideMode) {
+		waveformLevels = (float *)malloc(sizeof(float) * (size_t)n);
+		if (waveformLevels != NULL) {
+			memcpy(waveformLevels, levels, sizeof(float) * (size_t)n);
+			waveformCount = n;
+		} else {
+			waveformCount = 0;
+			wideMode = NO;
+		}
+	}
 	[self setNeedsDisplay:YES];
 }
 - (void)drawRect:(NSRect)dirtyRect {
@@ -63,7 +90,15 @@
 	};
 	NSSize textSize = [label sizeWithAttributes:attrs];
 	CGFloat gap = 14.0 * scale;
-	CGFloat contentW = dotSize + gap + textSize.width;
+	CGFloat contentW;
+	if (wideMode) {
+		CGFloat barW = 2.0 * scale;
+		CGFloat barGap = 1.0 * scale;
+		CGFloat barsW = (CGFloat)waveformCount * barW + (CGFloat)(waveformCount - 1) * barGap;
+		contentW = dotSize + gap + textSize.width + gap + barsW;
+	} else {
+		contentW = dotSize + gap + textSize.width;
+	}
 	dotX = (NSWidth(bounds) - contentW) / 2.0;
 	if (dotX < 0) dotX = 0;
 	NSBezierPath *dot = [NSBezierPath bezierPathWithOvalInRect:NSMakeRect(dotX, dotY, dotSize, dotSize)];
@@ -72,6 +107,25 @@
 	CGFloat textX = dotX + dotSize + gap;
 	CGFloat textY = (NSHeight(bounds) - textSize.height) / 2.0;
 	[label drawAtPoint:NSMakePoint(textX, textY) withAttributes:attrs];
+
+	if (wideMode) {
+		CGFloat barW = 2.0 * scale;
+		CGFloat barGap = 1.0 * scale;
+		CGFloat barH = 14.0 * scale;
+		CGFloat barsX = textX + textSize.width + gap;
+		CGFloat barTop = (NSHeight(bounds) - barH) / 2.0;
+		for (int i = 0; i < waveformCount; i++) {
+			CGFloat level = waveformLevels[i];
+			if (level < 0.05) level = 0.05;
+			CGFloat h = barH * level;
+			CGFloat bx = barsX + (CGFloat)i * (barW + barGap);
+			NSRect barRect = NSMakeRect(bx, barTop + (barH - h), barW, h);
+			NSBezierPath *bar = [NSBezierPath bezierPathWithRoundedRect:barRect
+				xRadius:barW / 2.0 yRadius:barW / 2.0];
+			[dotColor setFill];
+			[bar fill];
+		}
+	}
 }
 @end
 
@@ -177,12 +231,28 @@ void *jt_overlay_create(const char *position, double scale) {
 }
 
 void jt_overlay_show(void *handle, const char *labelText, unsigned short r, unsigned short g, unsigned short b) {
+	jt_overlay_show_wide(handle, labelText, r, g, b, NULL, 0);
+}
+
+void jt_overlay_show_wide(void *handle, const char *labelText, unsigned short r, unsigned short g, unsigned short b, const float *levels, int n) {
 	jt_overlay_t *overlay = (jt_overlay_t *)handle;
 	if (overlay == NULL) return;
 	char *labelCopy = strdup(labelText == NULL ? "" : labelText);
+	float *levelsCopy = NULL;
+	if (levels != NULL && n > 0) {
+		levelsCopy = (float *)malloc(sizeof(float) * (size_t)n);
+		if (levelsCopy != NULL) {
+			memcpy(levelsCopy, levels, sizeof(float) * (size_t)n);
+		}
+	}
 	jt_overlay_on_main_sync(^{
 		NSString *text = [NSString stringWithUTF8String:labelCopy == NULL ? "" : labelCopy];
-		[overlay->view setLabel:text red:((CGFloat)r / 65535.0) green:((CGFloat)g / 65535.0) blue:((CGFloat)b / 65535.0)];
+		[overlay->view setLabel:text
+							red:((CGFloat)r / 65535.0)
+						  green:((CGFloat)g / 65535.0)
+						   blue:((CGFloat)b / 65535.0)
+						 levels:(levelsCopy != NULL ? levelsCopy : NULL)
+						   count:(levelsCopy != NULL ? n : 0)];
 		jt_overlay_move(overlay);
 		[overlay->panel setIsVisible:YES];
 		[overlay->panel setAlphaValue:1.0];
@@ -192,6 +262,7 @@ void jt_overlay_show(void *handle, const char *labelText, unsigned short r, unsi
 		jt_overlay_pump();
 	});
 	if (labelCopy != NULL) free(labelCopy);
+	if (levelsCopy != NULL) free(levelsCopy);
 }
 
 void jt_overlay_hide(void *handle) {
@@ -235,6 +306,11 @@ void jt_overlay_run_helper(const char *position, double scale) {
 void jt_overlay_helper_show(const char *label, unsigned short r, unsigned short g, unsigned short b) {
 	if (helper_overlay == NULL) return;
 	jt_overlay_show(helper_overlay, label, r, g, b);
+}
+
+void jt_overlay_helper_show_wide(const char *label, unsigned short r, unsigned short g, unsigned short b, const float *levels, int n) {
+	if (helper_overlay == NULL) return;
+	jt_overlay_show_wide(helper_overlay, label, r, g, b, levels, n);
 }
 
 void jt_overlay_helper_hide(void) {

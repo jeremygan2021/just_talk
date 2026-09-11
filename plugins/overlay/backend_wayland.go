@@ -146,13 +146,13 @@ func newWaylandBackend(cfg config.OverlayConfig) (backend, error) {
 	return b, nil
 }
 
-func (b *waylandBackend) Show(label string, color statusColor) error {
+func (b *waylandBackend) Show(label string, color statusColor, levels []float32) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.display == nil || b.closed || b.destroyed {
 		return nil
 	}
-	b.draw(label, color)
+	b.draw(label, color, levels)
 	C.wl_surface_attach(b.surface, b.buffer, 0, 0)
 	C.wl_surface_damage_buffer(b.surface, 0, 0, C.int32_t(b.w), C.int32_t(b.h))
 	C.wl_surface_commit(b.surface)
@@ -299,7 +299,7 @@ func (b *waylandBackend) createBuffer() error {
 	return nil
 }
 
-func (b *waylandBackend) draw(label string, color statusColor) {
+func (b *waylandBackend) draw(label string, color statusColor, levels []float32) {
 	clear(b.data)
 	bg := rgba{20, 20, 20, 215}
 	fg := rgba{245, 245, 245, 255}
@@ -318,20 +318,69 @@ func (b *waylandBackend) draw(label string, color statusColor) {
 	gap := b.scaled(14)
 	textScale := b.scaled(3)
 	textW := bitmapTextWidth(label, textScale)
-	contentW := dotSize + gap + textW
+
+	if len(levels) == 0 {
+		// Short mode: dot + label, centered.
+		contentW := dotSize + gap + textW
+		dotX := (b.w - contentW) / 2
+		if dotX < 0 {
+			dotX = 0
+		}
+		dotY := (b.h - dotSize) / 2
+		b.fillCircleAA(dotX+dotSize/2, dotY+dotSize/2, dotSize/2, dot)
+		textH := 7 * textScale
+		textX := dotX + dotSize + gap
+		textY := (b.h - textH) / 2
+		if maxX := b.w - b.scaled(14) - textW; textX > maxX {
+			textX = maxX
+		}
+		b.drawText(textX, textY, label, textScale, fg)
+		return
+	}
+
+	// Wide mode: dot + label + bars. Center the whole group.
+	bars := subsampleWaveform(levels)
+	barW := b.scaled(2)
+	barGap := b.scaled(1)
+	barsW := len(bars)*barW + (len(bars)-1)*barGap
+	innerPad := b.scaled(14)
+	// Truncate the label so the whole composition still fits the
+	// capsule; the overlay is short for short recordings (REC / WAI)
+	// and long for partial transcript. We allow the label to consume
+	// up to two thirds of the available space, the rest goes to bars.
+	availLabel := (b.w - 2*innerPad - dotSize - gap - gap - barsW) / 2
+	if availLabel < 0 {
+		availLabel = 0
+	}
+	if textW > availLabel {
+		textW = truncateLabelWidth(label, textScale, availLabel)
+	}
+	contentW := dotSize + gap + textW + gap + barsW
 	dotX := (b.w - contentW) / 2
-	if dotX < 0 {
-		dotX = 0
+	if dotX < innerPad {
+		dotX = innerPad
 	}
 	dotY := (b.h - dotSize) / 2
 	b.fillCircleAA(dotX+dotSize/2, dotY+dotSize/2, dotSize/2, dot)
 	textH := 7 * textScale
 	textX := dotX + dotSize + gap
 	textY := (b.h - textH) / 2
-	if maxX := b.w - b.scaled(14) - textW; textX > maxX {
-		textX = maxX
-	}
 	b.drawText(textX, textY, label, textScale, fg)
+	barsX := textX + textW + gap
+	barH := b.scaled(14)
+	barTop := (b.h - barH) / 2
+	for i, level := range bars {
+		h := int(float32(barH) * level)
+		if h < b.scaled(2) {
+			h = b.scaled(2)
+		}
+		bx := barsX + i*(barW+barGap)
+		for yy := 0; yy < h; yy++ {
+			for xx := 0; xx < barW; xx++ {
+				b.setPixel(bx+xx, barTop+(barH-h)+yy, dot)
+			}
+		}
+	}
 }
 
 type rgba struct {

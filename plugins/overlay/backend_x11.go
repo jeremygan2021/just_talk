@@ -103,16 +103,24 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"unicode/utf8"
 	"unsafe"
 
 	"github.com/c/just-talk-go/config"
 )
 
 const (
-	basePillW  = 122
+	// basePillW is the capsule width. The default (220px) is wide
+	// enough to fit the dot, status label (REC / WAI / partial text),
+	// and the 24-bar waveform at scale 1 without truncation. The
+	// non-recording states still center inside this width, so the
+	// visual change vs the previous 122px design is a wider capsule.
+	basePillW  = 220
 	basePillH  = 42
 	baseMargin = 28
+
+	// waveformBarCount is the number of vertical bars drawn for the
+	// recording waveform. Must match overlay.waveformBars.
+	waveformBarCount = 24
 )
 
 type x11Backend struct {
@@ -204,12 +212,12 @@ func newX11Backend(cfg config.OverlayConfig) (backend, error) {
 	return b, nil
 }
 
-func (b *x11Backend) Show(label string, color statusColor) error {
+func (b *x11Backend) Show(label string, color statusColor, levels []float32) error {
 	if b.dpy == nil {
 		return nil
 	}
 	b.move()
-	b.draw(label, color)
+	b.draw(label, color, levels)
 	if !b.visible {
 		C.XMapRaised(b.dpy, b.win)
 		b.visible = true
@@ -285,9 +293,9 @@ func (b *x11Backend) focusedMonitor() (x, y, w, h int) {
 	return 0, 0, w, h
 }
 
-func (b *x11Backend) draw(label string, color statusColor) {
+func (b *x11Backend) draw(label string, color statusColor, levels []float32) {
 	if !b.argb {
-		b.drawShape(label, color)
+		b.drawShape(label, color, levels)
 		return
 	}
 	p := newARGBCanvas(b.w, b.h)
@@ -308,24 +316,69 @@ func (b *x11Backend) draw(label string, color statusColor) {
 	gap := b.scaled(14)
 	textScale := b.scaled(3)
 	textW := bitmapTextWidth(label, textScale)
-	contentW := dotSize + gap + textW
+
+	if len(levels) == 0 {
+		contentW := dotSize + gap + textW
+		dotX := (b.w - contentW) / 2
+		if dotX < 0 {
+			dotX = 0
+		}
+		dotY := (b.h - dotSize) / 2
+		p.fillCircleAA(dotX+dotSize/2, dotY+dotSize/2, dotSize/2, dot)
+		textH := 7 * textScale
+		textX := dotX + dotSize + gap
+		textY := (b.h - textH) / 2
+		if maxX := b.w - b.scaled(14) - textW; textX > maxX {
+			textX = maxX
+		}
+		p.drawText(textX, textY, label, textScale, fg)
+		b.putImage(p.data)
+		return
+	}
+
+	// Wide mode: dot + label + bars, centered as a group.
+	bars := subsampleWaveform(levels)
+	barW := b.scaled(2)
+	barGap := b.scaled(1)
+	barsW := len(bars)*barW + (len(bars)-1)*barGap
+	innerPad := b.scaled(14)
+	availLabel := (b.w - 2*innerPad - dotSize - gap - gap - barsW) / 2
+	if availLabel < 0 {
+		availLabel = 0
+	}
+	if textW > availLabel {
+		textW = truncateLabelWidth(label, textScale, availLabel)
+	}
+	contentW := dotSize + gap + textW + gap + barsW
 	dotX := (b.w - contentW) / 2
-	if dotX < 0 {
-		dotX = 0
+	if dotX < innerPad {
+		dotX = innerPad
 	}
 	dotY := (b.h - dotSize) / 2
 	p.fillCircleAA(dotX+dotSize/2, dotY+dotSize/2, dotSize/2, dot)
 	textH := 7 * textScale
 	textX := dotX + dotSize + gap
 	textY := (b.h - textH) / 2
-	if maxX := b.w - b.scaled(14) - textW; textX > maxX {
-		textX = maxX
-	}
 	p.drawText(textX, textY, label, textScale, fg)
+	barsX := textX + textW + gap
+	barH := b.scaled(14)
+	barTop := (b.h - barH) / 2
+	for i, level := range bars {
+		h := int(float32(barH) * level)
+		if h < b.scaled(2) {
+			h = b.scaled(2)
+		}
+		bx := barsX + i*(barW+barGap)
+		for yy := 0; yy < h; yy++ {
+			for xx := 0; xx < barW; xx++ {
+				p.setPixel(bx+xx, barTop+(barH-h)+yy, dot)
+			}
+		}
+	}
 	b.putImage(p.data)
 }
 
-func (b *x11Backend) drawShape(label string, color statusColor) {
+func (b *x11Backend) drawShape(label string, color statusColor, levels []float32) {
 	bg := b.alloc(20<<8, 20<<8, 20<<8)
 	fg := b.alloc(245<<8, 245<<8, 245<<8)
 	dot := b.alloc(color.R, color.G, color.B)
@@ -337,10 +390,47 @@ func (b *x11Backend) drawShape(label string, color statusColor) {
 	gap := b.scaled(14)
 	textScale := b.scaled(3)
 	textW := bitmapTextWidth(label, textScale)
-	contentW := dotSize + gap + textW
+
+	if len(levels) == 0 {
+		contentW := dotSize + gap + textW
+		dotX := (b.w - contentW) / 2
+		if dotX < 0 {
+			dotX = 0
+		}
+		dotY := (b.h - dotSize) / 2
+		C.XSetForeground(b.dpy, b.gc, dotEdge)
+		C.XFillArc(b.dpy, C.Drawable(b.win), b.gc, C.int(dotX), C.int(dotY), C.uint(dotSize), C.uint(dotSize), 0, 360*64)
+		inset := b.scaled(1)
+		C.XSetForeground(b.dpy, b.gc, dot)
+		C.XFillArc(b.dpy, C.Drawable(b.win), b.gc, C.int(dotX+inset), C.int(dotY+inset), C.uint(dotSize-2*inset), C.uint(dotSize-2*inset), 0, 360*64)
+		C.XSetForeground(b.dpy, b.gc, fg)
+		textH := 7 * textScale
+		textX := dotX + dotSize + gap
+		textY := (b.h - textH) / 2
+		if maxX := b.w - b.scaled(14) - textW; textX > maxX {
+			textX = maxX
+		}
+		drawBitmapText(b, textX, textY, label, textScale)
+		return
+	}
+
+	// Wide mode: dot + label + bars.
+	bars := subsampleWaveform(levels)
+	barW := b.scaled(2)
+	barGap := b.scaled(1)
+	barsW := len(bars)*barW + (len(bars)-1)*barGap
+	innerPad := b.scaled(14)
+	availLabel := (b.w - 2*innerPad - dotSize - gap - gap - barsW) / 2
+	if availLabel < 0 {
+		availLabel = 0
+	}
+	if textW > availLabel {
+		textW = truncateLabelWidth(label, textScale, availLabel)
+	}
+	contentW := dotSize + gap + textW + gap + barsW
 	dotX := (b.w - contentW) / 2
-	if dotX < 0 {
-		dotX = 0
+	if dotX < innerPad {
+		dotX = innerPad
 	}
 	dotY := (b.h - dotSize) / 2
 	C.XSetForeground(b.dpy, b.gc, dotEdge)
@@ -352,10 +442,19 @@ func (b *x11Backend) drawShape(label string, color statusColor) {
 	textH := 7 * textScale
 	textX := dotX + dotSize + gap
 	textY := (b.h - textH) / 2
-	if maxX := b.w - b.scaled(14) - textW; textX > maxX {
-		textX = maxX
-	}
 	drawBitmapText(b, textX, textY, label, textScale)
+	barsX := textX + textW + gap
+	barH := b.scaled(14)
+	barTop := (b.h - barH) / 2
+	C.XSetForeground(b.dpy, b.gc, dot)
+	for i, level := range bars {
+		h := int(float32(barH) * level)
+		if h < b.scaled(2) {
+			h = b.scaled(2)
+		}
+		bx := barsX + i*(barW+barGap)
+		C.XFillRectangle(b.dpy, C.Drawable(b.win), b.gc, C.int(bx), C.int(barTop+barH-h), C.uint(barW), C.uint(h))
+	}
 }
 
 func (b *x11Backend) alloc(r, g, bl uint16) C.ulong {
@@ -504,32 +603,6 @@ func drawBitmapText(b *x11Backend, x, y int, s string, scale int) {
 		}
 		x += 6 * scale
 	}
-}
-
-func bitmapTextWidth(s string, scale int) int {
-	if len(s) == 0 {
-		return 0
-	}
-	// Count runes, not bytes, so multi-byte symbols (for example the Return
-	// glyph) are measured the same way drawText advances the cursor.
-	return (utf8.RuneCountInString(s)*6 - 1) * scale
-}
-
-var glyphs = map[rune][7]byte{
-	'A': {0b01110, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001},
-	'C': {0b01110, 0b10001, 0b10000, 0b10000, 0b10000, 0b10001, 0b01110},
-	'D': {0b11110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b11110},
-	'E': {0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b11111},
-	'I': {0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b11111},
-	'N': {0b10001, 0b11001, 0b10101, 0b10011, 0b10001, 0b10001, 0b10001},
-	'O': {0b01110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110},
-	'P': {0b11110, 0b10001, 0b10001, 0b11110, 0b10000, 0b10000, 0b10000},
-	'R': {0b11110, 0b10001, 0b10001, 0b11110, 0b10100, 0b10010, 0b10001},
-	'S': {0b01111, 0b10000, 0b10000, 0b01110, 0b00001, 0b00001, 0b11110},
-	'T': {0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100},
-	'W': {0b10001, 0b10001, 0b10001, 0b10101, 0b10101, 0b10101, 0b01010},
-	'⏎': {0b00001, 0b00001, 0b00001, 0b00101, 0b11111, 0b00100, 0b00000},
-	'↶': {0b00000, 0b00011, 0b00100, 0b01000, 0b11111, 0b01000, 0b00100},
 }
 
 func roundedRectCoverage(x, y, w, h, r int) uint8 {
