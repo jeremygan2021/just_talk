@@ -5,6 +5,7 @@ package autotype
 import (
 	"fmt"
 	"log/slog"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -76,5 +77,52 @@ func simulatePaste() error {
 }
 
 func pasteMethod() string { return "windows/SendInput+Ctrl+V" }
+
+// sendEnterPlatform simulates a Return key press via SendInput.
+func sendEnterPlatform(logger *slog.Logger) error {
+	sendWinKey(0x0D) // VK_RETURN
+	logger.Debug("send enter done", "method", "windows/SendInput+Return")
+	return nil
+}
+
+func sendUndoPlatform(logger *slog.Logger) error {
+	sendWinCtrlKey(0x5A) // VK_Z
+	logger.Debug("undo done", "method", "windows/SendInput+Ctrl+Z")
+	return nil
+}
+
+func sendClearInputPlatform(logger *slog.Logger) error {
+	sendWinCtrlKey(0x41) // VK_A
+	time.Sleep(30 * time.Millisecond)
+	sendWinKey(0x08) // VK_BACK
+	logger.Debug("clear input done", "method", "windows/SendInput+Ctrl+A+Backspace")
+	return nil
+}
+
+func sendWinKey(vk uint16) {
+	inputs := []input{
+		{Type: inputKeyboard, Ki: keyboardInput{Wvk: vk}},
+		{Type: inputKeyboard, Ki: keyboardInput{Wvk: vk, DwFlags: keyeventfKeyUp}},
+	}
+	sendWinInputs(inputs)
+}
+
+func sendWinCtrlKey(vk uint16) {
+	inputs := []input{
+		{Type: inputKeyboard, Ki: keyboardInput{Wvk: 0x11}}, // VK_CONTROL down
+		{Type: inputKeyboard, Ki: keyboardInput{Wvk: vk}},
+		{Type: inputKeyboard, Ki: keyboardInput{Wvk: vk, DwFlags: keyeventfKeyUp}},
+		{Type: inputKeyboard, Ki: keyboardInput{Wvk: 0x11, DwFlags: keyeventfKeyUp}},
+	}
+	sendWinInputs(inputs)
+}
+
+func sendWinInputs(inputs []input) {
+	procSendInput.Call(
+		uintptr(len(inputs)),
+		uintptr(unsafe.Pointer(&inputs[0])),
+		uintptr(unsafe.Sizeof(input{})),
+	)
+}
 
 func isWaylandSession() bool { return false }

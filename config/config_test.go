@@ -2,6 +2,16 @@ package config
 
 import "testing"
 
+func TestDefaultTripleTap(t *testing.T) {
+	cfg := Default()
+	if !cfg.Voice.TripleTapSend {
+		t.Fatal("TripleTapSend should default to true")
+	}
+	if cfg.Voice.TripleTapMs != 500 {
+		t.Fatalf("TripleTapMs = %d, want 500", cfg.Voice.TripleTapMs)
+	}
+}
+
 func TestNormalizeMode(t *testing.T) {
 	cases := []struct {
 		in   string

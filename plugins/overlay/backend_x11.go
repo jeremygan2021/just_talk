@@ -103,6 +103,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"unicode/utf8"
 	"unsafe"
 
 	"github.com/c/just-talk-go/config"
@@ -509,7 +510,9 @@ func bitmapTextWidth(s string, scale int) int {
 	if len(s) == 0 {
 		return 0
 	}
-	return (len(s)*6 - 1) * scale
+	// Count runes, not bytes, so multi-byte symbols (for example the Return
+	// glyph) are measured the same way drawText advances the cursor.
+	return (utf8.RuneCountInString(s)*6 - 1) * scale
 }
 
 var glyphs = map[rune][7]byte{
@@ -524,7 +527,9 @@ var glyphs = map[rune][7]byte{
 	'R': {0b11110, 0b10001, 0b10001, 0b11110, 0b10100, 0b10010, 0b10001},
 	'S': {0b01111, 0b10000, 0b10000, 0b01110, 0b00001, 0b00001, 0b11110},
 	'T': {0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100},
-	'W': {0b10001, 0b10001, 0b10001, 0b10101, 0b10101, 0b10101, 0b01010},
+	'W':  {0b10001, 0b10001, 0b10001, 0b10101, 0b10101, 0b10101, 0b01010},
+	'⏎':  {0b00001, 0b00001, 0b00001, 0b00101, 0b11111, 0b00100, 0b00000},
+	'↶':  {0b00000, 0b00011, 0b00100, 0b01000, 0b11111, 0b01000, 0b00100},
 }
 
 func roundedRectCoverage(x, y, w, h, r int) uint8 {

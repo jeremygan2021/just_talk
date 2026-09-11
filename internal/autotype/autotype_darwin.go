@@ -26,6 +26,45 @@ package autotype
 //
 // 	CFRelease(cmdDown); CFRelease(vDown); CFRelease(vUp); CFRelease(cmdUp);
 // }
+//
+// static void cgevent_return(void) {
+// 	CGEventRef retDown = CGEventCreateKeyboardEvent(NULL, (CGKeyCode)36, true);  // kVK_Return
+// 	CGEventRef retUp   = CGEventCreateKeyboardEvent(NULL, (CGKeyCode)36, false);
+//
+// 	CGEventPost(kCGSessionEventTap, retDown);
+// 	usleep(20000);
+// 	CGEventPost(kCGSessionEventTap, retUp);
+//
+// 	CFRelease(retDown); CFRelease(retUp);
+// }
+//
+// static void cgevent_ctrl_key(CGKeyCode code) {
+// 	CGEventRef down = CGEventCreateKeyboardEvent(NULL, code, true);
+// 	CGEventRef up   = CGEventCreateKeyboardEvent(NULL, code, false);
+//
+// 	CGEventSetFlags(down, kCGEventFlagMaskControl);
+// 	CGEventSetFlags(up, kCGEventFlagMaskControl);
+//
+// 	CGEventPost(kCGSessionEventTap, down);
+// 	usleep(30000);
+// 	CGEventPost(kCGSessionEventTap, up);
+//
+// 	CFRelease(down); CFRelease(up);
+// }
+//
+// static void cgevent_ctrl_a_backspace(void) {
+// 	cgevent_ctrl_key((CGKeyCode)0);  // kVK_ANSI_A
+// 	usleep(30000);
+//
+// 	CGEventRef down = CGEventCreateKeyboardEvent(NULL, (CGKeyCode)51, true);  // kVK_Delete
+// 	CGEventRef up   = CGEventCreateKeyboardEvent(NULL, (CGKeyCode)51, false);
+//
+// 	CGEventPost(kCGSessionEventTap, down);
+// 	usleep(20000);
+// 	CGEventPost(kCGSessionEventTap, up);
+//
+// 	CFRelease(down); CFRelease(up);
+// }
 import "C"
 
 import (
@@ -55,6 +94,24 @@ func pastePlatform(text string, logger *slog.Logger) error {
 
 func simulatePaste() error {
 	C.cgevent_cmd_v()
+	return nil
+}
+
+func sendEnterPlatform(logger *slog.Logger) error {
+	C.cgevent_return()
+	logger.Debug("send enter done", "method", "darwin/CGEventPost+Return")
+	return nil
+}
+
+func sendUndoPlatform(logger *slog.Logger) error {
+	C.cgevent_ctrl_key((C.CGKeyCode)(6)) // kVK_ANSI_Z
+	logger.Debug("undo done", "method", "darwin/CGEventPost+Ctrl+Z")
+	return nil
+}
+
+func sendClearInputPlatform(logger *slog.Logger) error {
+	C.cgevent_ctrl_a_backspace()
+	logger.Debug("clear input done", "method", "darwin/CGEventPost+Ctrl+A+Backspace")
 	return nil
 }
 

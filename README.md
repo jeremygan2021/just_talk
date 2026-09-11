@@ -18,6 +18,7 @@ Just Talk 是一个面向桌面环境的语音输入工具。它通过全局快�
 - 语音热键限定为适合作为全局快捷键的按键：支持纯修饰键、功能键、Tab、CapsLock、方向键和导航键等；不支持字母、数字、标点、空格等普通字符键。
 - 豆包大模型 ASR，支持三种后端：`doubao_url`（推荐，文件 URL/Base64 上传，单 token `x-api-key`）、`online`（流式 WebSocket，需 AppKey+AccessKey）、`offline`（本地 SenseVoice，无需联网）。
 - 自动复制到剪贴板，支持自动上屏。
+- 三击发送回车：空闲时快速按三次语音热键，即向当前输入框发送一次回车（Enter），方便在聊天、写代码时“说完即发送”；三击时 overlay 会短暂显示 `⏎` 回车提示符替代录音圆点。可用 `triple_tap_send = false` 关闭，`triple_tap_ms` 调整判定间隔；正在录音/等待识别时不会触发。
 - Wayland / X11 / macOS 顶层录音状态胶囊提示。
 - TUI 配置界面，支持热键、模式、自动上屏、停止延迟、热词、LLM 等配置；热键字段支持 `c` 直接录制组合键，无需手动输入。
 - 热词增强识别，适合项目名、人名、英文术语和专有名词。
@@ -125,6 +126,16 @@ push_to_talk = "Alt+Super"
 ```toml
 [voice]
 hotwords = ["Wayland", "Sway", "wl-copy", "wtype", "just-talk-go"]
+```
+
+三击回车示例（默认开启）：
+
+```toml
+[voice]
+# 空闲时快速按三次热键 → 发送回车
+triple_tap_send = true
+# 判定三击的最大按键间隔（毫秒），会自动收敛到不超过 stop_delay_ms
+triple_tap_ms = 500
 ```
 
 `doubao_url` 后端配置（推荐，使用 `volc.seedasr.auc` 单 token）：

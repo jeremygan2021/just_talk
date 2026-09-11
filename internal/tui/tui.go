@@ -95,6 +95,8 @@ func New(cfg *config.Config) *Model {
 		{label: "豆包 API Key", key: "doubao_api_key", help: "doubao_url 后端: volc.seedasr.auc 的 x-api-key", fType: fString, input: ti(vc.DoubaoAPIKey)},
 		{label: "自动上屏", key: "auto_submit", help: "识别后自动粘贴", fType: fToggle, boolVal: vc.AutoSubmit},
 		{label: "停止延迟(ms)", key: "stop_delay_ms", help: "松手后补录毫秒", fType: fString, input: ti(fmt.Sprintf("%d", vc.StopDelayMs))},
+		{label: "三击回车", key: "triple_tap_send", help: "空闲时快速按三次热键=发送回车", fType: fToggle, boolVal: vc.TripleTapSend},
+		{label: "三击间隔(ms)", key: "triple_tap_ms", help: "三击判定最大按键间隔，应小于停止延迟", fType: fString, input: ti(fmt.Sprintf("%d", vc.TripleTapMs))},
 		{label: "热词", key: "hotwords", help: "逗号分隔术语", fType: fString, input: ti(strings.Join(vc.Hotwords, ", "))},
 	}
 	return &Model{cfg: cfg, fields: fs, logs: make([]string, 0, 100), cursor: -1, showLogs: true}
@@ -344,6 +346,10 @@ func (m *Model) save() {
 			vc.AutoSubmit = f.boolVal
 		case "stop_delay_ms":
 			fmt.Sscanf(f.input.Value(), "%d", &vc.StopDelayMs)
+		case "triple_tap_send":
+			vc.TripleTapSend = f.boolVal
+		case "triple_tap_ms":
+			fmt.Sscanf(f.input.Value(), "%d", &vc.TripleTapMs)
 		case "hotwords":
 			vc.Hotwords = splitList(f.input.Value())
 		}
@@ -440,7 +446,7 @@ func (m *Model) View() string {
 		if f.fType == fHotkey && m.capturing && m.captureKey == f.key {
 			line += "  " + wStyle.Render("[等待按键…]")
 		} else if m.helpVisible && f.help != "" {
-			line += " " + dStyle.Render("(" + f.help + ")")
+			line += " " + dStyle.Render("("+f.help+")")
 		}
 		b.WriteString(line + "\n")
 	}
@@ -512,6 +518,8 @@ func (m *Model) renderVoiceStatus() string {
 		label, style = "延迟停止", wStyle
 	case "stopping":
 		label, style = "停止中", wStyle
+	case "enter":
+		label, style = "回车发送", aStyle
 	case "error":
 		label, style = "错误", eStyle
 	}

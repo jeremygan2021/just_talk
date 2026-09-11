@@ -22,13 +22,31 @@ import (
 
 const (
 	defaultStopDelayMs = 800
+	defaultTripleTapMs = 500
 	errorHoldDuration  = 10 * time.Second
+	// enterHintDuration is how long the overlay keeps showing the Enter
+	// hint after a triple-tap has fired.
+	enterHintDuration = 1200 * time.Millisecond
+	// undoTapActionUndo / undoTapActionClear select the double-tap payload.
+	undoTapActionUndo  = "undo"
+	undoTapActionClear = "clear"
 )
 
 var (
 	cancelRecordingCombo = hotkey.Combo{Mods: hotkey.ModNone, Key: hotkey.KeyEscape}
 	retryErrorCombo      = hotkey.Combo{Mods: hotkey.ModNone, Key: hotkey.KeyR}
 )
+
+// sendEnterKey and sendUndoInput are indirected so tests can observe the
+// multi-tap dispatch without injecting real keystrokes.
+var sendEnterKey = autotype.SendEnter
+
+var sendUndoInput = func(action string, logger *slog.Logger) error {
+	if action == undoTapActionClear {
+		return autotype.SendClearInput(logger)
+	}
+	return autotype.SendUndo(logger)
+}
 
 var TUILog func(string)
 var TUILogBuf []string
@@ -57,6 +75,8 @@ type TUIVoiceStatus struct {
 	QueuedHotkeys   uint64
 	HandledHotkeys  uint64
 	EventQueueLen   int
+	EnterUntil      time.Time
+	UndoUntil       time.Time
 }
 
 type TUIVoiceStats struct {
@@ -198,6 +218,24 @@ func TUIStatus() TUIVoiceStatus {
 		tuiStatus.ErrorUntil = time.Time{}
 		tuiStatus.UpdatedAt = time.Now()
 	}
+	if tuiStatus.State == "enter" && !tuiStatus.EnterUntil.IsZero() && time.Now().After(tuiStatus.EnterUntil) {
+		tuiStatus.State = "idle"
+		tuiStatus.Detail = "等待热键"
+		tuiStatus.Recording = false
+		tuiStatus.Stopping = false
+		tuiStatus.StopAt = time.Time{}
+		tuiStatus.EnterUntil = time.Time{}
+		tuiStatus.UpdatedAt = time.Now()
+	}
+	if tuiStatus.State == "undo" && !tuiStatus.UndoUntil.IsZero() && time.Now().After(tuiStatus.UndoUntil) {
+		tuiStatus.State = "idle"
+		tuiStatus.Detail = "等待热键"
+		tuiStatus.Recording = false
+		tuiStatus.Stopping = false
+		tuiStatus.StopAt = time.Time{}
+		tuiStatus.UndoUntil = time.Time{}
+		tuiStatus.UpdatedAt = time.Now()
+	}
 	return tuiStatus
 }
 
@@ -259,6 +297,7 @@ type VoicePlugin struct {
 	autoSubmit             bool
 	stopDelayMs            int
 	pendingDone            int
+	outputInFlight         int
 	finishingSessions      map[uint64]struct{}
 	canceledSessions       map[uint64]struct{}
 	outputSessions         map[uint64]struct{}
@@ -268,7 +307,16 @@ type VoicePlugin struct {
 	flowActive             bool
 	cancelHotkeyRegistered bool
 	retryHotkeyRegistered  bool
-
+	tripleTapSend          bool
+	tripleTapWindow        time.Duration
+	tapCount               int
+	lastTapAt              time.Time
+	tapKeyDown             bool
+	enterUntil             time.Time
+	doubleTapUndo          bool
+	doubleTapAction        string
+	doubleTimer            *time.Timer
+	undoUntil              time.Time
 }
 
 type recordingSession struct {
@@ -309,6 +357,7 @@ func (p *VoicePlugin) Stop() error {
 	p.mu.Lock()
 	session := p.detachRecordingLocked()
 	p.trackFinishLocked(session)
+	p.cancelDoubleTimerLocked()
 	p.publishStatusLocked()
 	p.mu.Unlock()
 	p.finishRecordingSession(session)
@@ -323,7 +372,10 @@ func (p *VoicePlugin) registerFromConfig(cfg *config.Config) error {
 		p.mu.Lock()
 		oldCombo := p.combo
 		p.cleanupTransientHotkeysLocked()
+		p.cancelDoubleTimerLocked()
 		p.combo = hotkey.Combo{}
+		p.tapCount = 0
+		p.tapKeyDown = false
 		p.mu.Unlock()
 		if oldCombo.Key != hotkey.KeyNone || oldCombo.Mods != hotkey.ModNone {
 			p.env.UnregisterHotkey(oldCombo)
@@ -347,6 +399,25 @@ func (p *VoicePlugin) registerFromConfig(cfg *config.Config) error {
 	if stopDelayMs <= 0 {
 		stopDelayMs = defaultStopDelayMs
 	}
+	tripleTapMs := vc.TripleTapMs
+	if tripleTapMs <= 0 {
+		tripleTapMs = defaultTripleTapMs
+	}
+	tripleTapWindow := time.Duration(tripleTapMs) * time.Millisecond
+	// Keep the multi-tap window comfortably inside the stop delay so the
+	// accidental recording started by the first tap is still active (and
+	// cancelable) when the gesture completes. The margin also stops a
+	// confirmed double-tap from racing the stop-delay timer.
+	if stopDelay := time.Duration(stopDelayMs) * time.Millisecond; tripleTapWindow > stopDelay-150*time.Millisecond {
+		tripleTapWindow = stopDelay - 150*time.Millisecond
+	}
+	if tripleTapWindow < 100*time.Millisecond {
+		tripleTapWindow = 100 * time.Millisecond
+	}
+	doubleTapAction, err := config.NormalizeDoubleTapAction(vc.DoubleTapAction)
+	if err != nil {
+		return err
+	}
 
 	p.mu.Lock()
 	oldCombo := p.combo
@@ -356,10 +427,19 @@ func (p *VoicePlugin) registerFromConfig(cfg *config.Config) error {
 	p.mode = mode
 	p.autoSubmit = vc.AutoSubmit
 	p.stopDelayMs = stopDelayMs
+	p.tripleTapSend = vc.TripleTapSend
+	p.tripleTapWindow = tripleTapWindow
+	p.doubleTapUndo = vc.DoubleTapUndo
+	p.doubleTapAction = doubleTapAction
+	p.cancelDoubleTimerLocked()
+	p.tapCount = 0
+	p.tapKeyDown = false
 	p.mu.Unlock()
 
 	p.logger.Info("config_reloaded", "hotkey", combo, "mode", mode,
-		"auto_submit", vc.AutoSubmit, "stop_delay_ms", stopDelayMs)
+		"auto_submit", vc.AutoSubmit, "stop_delay_ms", stopDelayMs,
+		"triple_tap_send", vc.TripleTapSend, "triple_tap_ms", tripleTapMs,
+		"double_tap_undo", vc.DoubleTapUndo, "double_tap_action", doubleTapAction)
 
 	if !sameRegistration {
 		isOld := oldCombo.Key != hotkey.KeyNone || oldCombo.Mods != hotkey.ModNone
@@ -379,13 +459,9 @@ func (p *VoicePlugin) onHotkey(evt hotkey.Event) {
 	markTUIHotkey(evt)
 	p.logger.Debug("voice hotkey received", "type", evt.Type, "combo", evt.Combo)
 	p.startEventWorker(p.env.Engine().Context())
-	p.mu.Lock()
-	mode := p.mode
-	p.mu.Unlock()
-	if mode == "toggle" && evt.Type != hotkey.KeyDown {
-		p.logger.Debug("voice hotkey ignored", "type", evt.Type, "mode", mode)
-		return
-	}
+	// KeyUp is queued even in toggle mode: the event loop ignores it for
+	// recording, but triple-tap detection needs the release edge to tell a
+	// genuine re-press apart from keyboard auto-repeat.
 	p.events <- evt
 	markTUIQueued(evt, len(p.events))
 	p.logger.Debug("voice hotkey queued", "type", evt.Type, "queue_len", len(p.events))
@@ -425,9 +501,30 @@ func (p *VoicePlugin) eventLoop(ctx context.Context) {
 
 func (p *VoicePlugin) handleHotkey(evt hotkey.Event) {
 	markTUIHandled(evt)
+
+	gesture := tapNone
 	p.mu.Lock()
+	if evt.Type == hotkey.KeyDown {
+		repeat := p.tapKeyDown
+		p.tapKeyDown = true
+		if !repeat {
+			gesture = p.noteTapLocked(time.Now())
+		}
+	} else {
+		p.tapKeyDown = false
+	}
 	mode, rec, stopping := p.mode, p.recording, p.stopping
 	p.mu.Unlock()
+
+	if gesture == tapTriple {
+		p.logger.Debug("voice triple-tap detected: sending enter")
+		p.triggerEnterSend()
+		return
+	}
+	// A double-tap is armed by noteTapLocked but only fires from a timer once
+	// the triple-tap window closes, so the taps below still get their normal
+	// hold/toggle handling until then.
+
 	p.logger.Debug("voice hotkey handling", "type", evt.Type, "mode", mode, "recording", rec, "stopping", stopping)
 	switch mode {
 	case "hold":
@@ -452,6 +549,153 @@ func (p *VoicePlugin) handleHotkey(evt hotkey.Event) {
 		} else {
 			p.startStopDelay()
 		}
+	}
+}
+
+// tapGesture is the resolved meaning of a completed multi-tap sequence.
+type tapGesture int
+
+const (
+	tapNone tapGesture = iota
+	tapDouble
+	tapTriple
+)
+
+// noteTapLocked records a hotkey press and reports whether it completes a
+// double- or triple-tap gesture. The caller must hold p.mu.
+//
+// A gesture only starts from an idle plugin: if a recording (or its finish
+// work) is already in flight, presses are left to the normal hold/toggle
+// handling. Once a gesture has started, further presses inside the window
+// extend it; a slow re-press restarts the count, which naturally requires the
+// plugin to be idle again at that point.
+//
+// A double-tap cannot be reported immediately, because a third tap may still
+// turn it into a triple-tap. It is therefore armed as a timer that fires when
+// the window closes (see fireDoubleTap).
+func (p *VoicePlugin) noteTapLocked(now time.Time) tapGesture {
+	if p.tripleTapWindow <= 0 || (!p.tripleTapSend && !p.doubleTapUndo) {
+		return tapNone
+	}
+	idle := !p.recording && !p.stopping && p.pendingDone == 0 && p.outputInFlight == 0 &&
+		!(p.lastError != "" && now.Before(p.errorUntil))
+	if p.tapCount == 0 {
+		if !idle {
+			return tapNone
+		}
+		p.tapCount = 1
+		p.lastTapAt = now
+		return tapNone
+	}
+	if now.Sub(p.lastTapAt) > p.tripleTapWindow {
+		p.cancelDoubleTimerLocked()
+		p.tapCount = 0
+		return p.noteTapLocked(now)
+	}
+	p.lastTapAt = now
+	p.tapCount++
+	switch {
+	case p.tapCount == 2:
+		if p.doubleTapUndo {
+			p.armDoubleTapLocked()
+		}
+		return tapNone
+	case p.tapCount >= 3:
+		p.cancelDoubleTimerLocked()
+		p.tapCount = 0
+		if p.tripleTapSend {
+			return tapTriple
+		}
+		return tapNone
+	}
+	return tapNone
+}
+
+// armDoubleTapLocked schedules the retract action for when the triple-tap
+// window closes without a third press.
+func (p *VoicePlugin) armDoubleTapLocked() {
+	p.cancelDoubleTimerLocked()
+	if p.tripleTapWindow <= 0 {
+		return
+	}
+	p.doubleTimer = time.AfterFunc(p.tripleTapWindow, p.fireDoubleTap)
+}
+
+func (p *VoicePlugin) cancelDoubleTimerLocked() {
+	if p.doubleTimer != nil {
+		p.doubleTimer.Stop()
+		p.doubleTimer = nil
+	}
+}
+
+// fireDoubleTap runs once the double-tap is confirmed (no third tap arrived).
+// It discards the recording started by the first tap, flashes the overlay
+// retract hint, and injects the configured retract keys.
+func (p *VoicePlugin) fireDoubleTap() {
+	p.mu.Lock()
+	if p.tapCount != 2 {
+		// A third tap completed a triple, or the sequence was reset.
+		p.doubleTimer = nil
+		p.mu.Unlock()
+		return
+	}
+	p.doubleTimer = nil
+	p.tapCount = 0
+	session := p.detachRecordingLocked()
+	action := p.doubleTapAction
+	p.undoUntil = time.Now().Add(enterHintDuration)
+	p.publishStatusLocked()
+	p.mu.Unlock()
+
+	if session != nil {
+		go p.discardRecordingSession(session)
+	}
+	pout("↶ 撤回输入")
+	go func() {
+		if err := sendUndoInput(action, p.logger); err != nil {
+			pout("❌ 撤回失败: %v", err)
+		}
+	}()
+}
+
+// triggerEnterSend discards any recording the first two taps may have
+// started, flashes the overlay Enter hint, and presses Enter in the focused
+// window.
+func (p *VoicePlugin) triggerEnterSend() {
+	p.mu.Lock()
+	p.cancelDoubleTimerLocked()
+	session := p.detachRecordingLocked()
+	p.enterUntil = time.Now().Add(enterHintDuration)
+	p.tapCount = 0
+	p.publishStatusLocked()
+	p.mu.Unlock()
+
+	if session != nil {
+		go p.discardRecordingSession(session)
+	}
+	pout("↵ 发送回车")
+	go func() {
+		if err := sendEnterKey(p.logger); err != nil {
+			pout("❌ 回车发送失败: %v", err)
+		}
+	}()
+}
+
+// discardRecordingSession tears down a recording without dispatching its
+// transcript. Used when a triple-tap cancels the recording started by the
+// first tap of the gesture.
+func (p *VoicePlugin) discardRecordingSession(session *recordingSession) {
+	if session == nil {
+		return
+	}
+	if session.asrCancel != nil {
+		session.asrCancel()
+	}
+	if session.recorder != nil {
+		_, _ = session.recorder.Stop()
+	}
+	if session.asrClient != nil {
+		_ = session.asrClient.Close()
 	}
 }
 
@@ -838,7 +1082,19 @@ func (p *VoicePlugin) finishRecordingSession(session *recordingSession) {
 }
 
 func (p *VoicePlugin) dispatchTextOutput(text string, autoSubmit bool) {
+	// Track in-flight dispatch so the triple-tap Enter gesture does not fire
+	// before the paste/Shift+Insert has actually landed in the focused field.
+	p.mu.Lock()
+	p.outputInFlight++
+	p.mu.Unlock()
 	go func() {
+		defer func() {
+			p.mu.Lock()
+			if p.outputInFlight > 0 {
+				p.outputInFlight--
+			}
+			p.mu.Unlock()
+		}()
 		if autoSubmit {
 			if err := autotype.Paste(text, p.logger); err != nil {
 				pout("❌ 上屏失败: %v", err)
@@ -911,6 +1167,10 @@ func (p *VoicePlugin) publishStatusLocked() {
 		stopping = true
 	case p.lastError != "" && time.Now().Before(p.errorUntil):
 		state, detail = "error", p.lastError
+	case time.Now().Before(p.enterUntil):
+		state, detail = "enter", "已发送回车"
+	case time.Now().Before(p.undoUntil):
+		state, detail = "undo", "已撤回输入"
 	}
 
 	p.publishStatusSnapshotLocked(state, detail, recording, stopping, stopAt, p.sessionID)
@@ -957,6 +1217,8 @@ func (p *VoicePlugin) publishStatusSnapshotLocked(state, detail string, recordin
 		s.ErrorUntil = p.errorUntil
 		s.SessionID = sessionID
 		s.PendingFinishes = pendingDone
+		s.EnterUntil = p.enterUntil
+		s.UndoUntil = p.undoUntil
 	})
 }
 

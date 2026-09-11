@@ -18,6 +18,7 @@ It is built for people who want to type less and speak more while coding, chatti
 - Voice hotkeys are limited to keys suitable for global shortcuts: modifiers, function keys, Tab, CapsLock, arrow/navigation keys, and similar non-text keys. Letters, digits, punctuation, Space, and other text-producing keys are rejected.
 - Doubao ASR with three selectable backends: `doubao_url` (recommended, file-URL/base64 upload with a single `x-api-key`), `online` (streaming WebSocket, needs an AppKey + AccessKey pair), and `offline` (local SenseVoice, no network).
 - Clipboard copy and automatic text submission.
+- Triple-tap to send Enter: while idle, quickly tap the voice hotkey three times to press Enter in the focused field, so text pasted by auto-submit can be sent without touching the keyboard. The overlay briefly shows a `⏎` Return hint instead of the record dot. Disable it with `triple_tap_send = false` and tune the detection gap with `triple_tap_ms`. It never fires while a recording or ASR finish is in flight.
 - Always-on-top recording status overlay for Wayland, X11, and macOS.
 - TUI configuration for hotkeys, mode, auto-submit, stop delay, hotwords, LLM, and related settings. The hotkey field supports `c` to record a combo directly without typing the textual representation.
 - ASR hotwords for project names, people names, English terms, and domain-specific vocabulary.
@@ -125,6 +126,16 @@ Hotword example:
 ```toml
 [voice]
 hotwords = ["Wayland", "Sway", "wl-copy", "wtype", "just-talk-go"]
+```
+
+Triple-tap Enter example (enabled by default):
+
+```toml
+[voice]
+# Quickly tap the hotkey three times while idle to press Enter
+triple_tap_send = true
+# Maximum gap between taps (ms); clamped to stop_delay_ms
+triple_tap_ms = 500
 ```
 
 `doubao_url` backend (recommended, single `volc.seedasr.auc` token):

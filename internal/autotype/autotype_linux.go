@@ -30,6 +30,55 @@ package autotype
 // 	XTestFakeKeyEvent(dpy, shift, False, 0);
 // 	XFlush(dpy);
 // }
+// static void xtest_return(Display *dpy) {
+// 	KeyCode ret = XKeysymToKeycode(dpy, XK_Return);
+// 	if (ret == 0) return;
+//
+// 	XTestFakeKeyEvent(dpy, ret, True, 0);
+// 	XFlush(dpy);
+// 	usleep(20000);
+//
+// 	XTestFakeKeyEvent(dpy, ret, False, 0);
+// 	XFlush(dpy);
+// }
+// static void xtest_key(Display *dpy, KeySym ks) {
+// 	KeyCode kc = XKeysymToKeycode(dpy, ks);
+// 	if (kc == 0) return;
+//
+// 	XTestFakeKeyEvent(dpy, kc, True, 0);
+// 	XFlush(dpy);
+// 	usleep(20000);
+//
+// 	XTestFakeKeyEvent(dpy, kc, False, 0);
+// 	XFlush(dpy);
+// }
+//
+// static void xtest_ctrl_key(Display *dpy, KeySym ks) {
+// 	KeyCode ctrl = XKeysymToKeycode(dpy, XK_Control_L);
+// 	KeyCode kc = XKeysymToKeycode(dpy, ks);
+// 	if (ctrl == 0 || kc == 0) return;
+//
+// 	XTestFakeKeyEvent(dpy, ctrl, True, 0);
+// 	XFlush(dpy);
+// 	usleep(15000);
+//
+// 	XTestFakeKeyEvent(dpy, kc, True, 0);
+// 	XFlush(dpy);
+// 	usleep(30000);
+//
+// 	XTestFakeKeyEvent(dpy, kc, False, 0);
+// 	XFlush(dpy);
+// 	usleep(15000);
+//
+// 	XTestFakeKeyEvent(dpy, ctrl, False, 0);
+// 	XFlush(dpy);
+// }
+//
+// static void xtest_ctrl_a_backspace(Display *dpy) {
+// 	xtest_ctrl_key(dpy, XK_a);
+// 	usleep(30000);
+// 	xtest_key(dpy, XK_BackSpace);
+// }
 import "C"
 
 import (
@@ -201,6 +250,168 @@ func simulatePasteUinput() error {
 	time.Sleep(keyDelayMs * time.Millisecond)
 	if err := keyboard.KeyUp(uinput.KeyLeftshift); err != nil {
 		return fmt.Errorf("uinput shift up: %w", err)
+	}
+	return nil
+}
+
+// sendEnterPlatform presses the Return key in the focused window.
+func sendEnterPlatform(logger *slog.Logger) error {
+	if isWaylandSession() {
+		return sendEnterWayland(logger)
+	}
+	return sendEnterX11(logger)
+}
+
+func sendEnterX11(logger *slog.Logger) error {
+	dpy := C.XOpenDisplay(nil)
+	if dpy == nil {
+		return fmt.Errorf("cannot open X display")
+	}
+	defer C.XCloseDisplay(dpy)
+
+	C.xtest_return(dpy)
+	logger.Debug("send enter done", "method", "x11/XTest+Return")
+	return nil
+}
+
+func sendEnterWayland(logger *slog.Logger) error {
+	if !isKDEPlasma() {
+		if _, err := exec.LookPath("wtype"); err == nil {
+			if err := exec.Command("wtype", "-k", "Return").Run(); err == nil {
+				logger.Debug("send enter done", "method", "wayland/wtype")
+				return nil
+			}
+		}
+	}
+	if err := sendEnterUinput(); err != nil {
+		return err
+	}
+	logger.Debug("send enter done", "method", "wayland/uinput")
+	return nil
+}
+
+func sendEnterUinput() error {
+	keyboard, err := uinput.CreateKeyboard(uinputDev, []byte("just-talk virtual keyboard"))
+	if err != nil {
+		return fmt.Errorf("create uinput keyboard: %w", err)
+	}
+	defer keyboard.Close()
+
+	time.Sleep(80 * time.Millisecond)
+	if err := keyboard.KeyDown(uinput.KeyEnter); err != nil {
+		return fmt.Errorf("uinput enter down: %w", err)
+	}
+	time.Sleep(keyDelayMs * time.Millisecond)
+	if err := keyboard.KeyUp(uinput.KeyEnter); err != nil {
+		return fmt.Errorf("uinput enter up: %w", err)
+	}
+	return nil
+}
+
+func sendUndoPlatform(logger *slog.Logger) error {
+	if isWaylandSession() {
+		return sendWaylandChord(logger, false)
+	}
+	return sendX11Chord(logger, false)
+}
+
+func sendClearInputPlatform(logger *slog.Logger) error {
+	if isWaylandSession() {
+		return sendWaylandChord(logger, true)
+	}
+	return sendX11Chord(logger, true)
+}
+
+// sendX11Chord injects Ctrl+Z (clear=false) or Ctrl+A then Backspace
+// (clear=true) through XTest.
+func sendX11Chord(logger *slog.Logger, clear bool) error {
+	dpy := C.XOpenDisplay(nil)
+	if dpy == nil {
+		return fmt.Errorf("cannot open X display")
+	}
+	defer C.XCloseDisplay(dpy)
+
+	if clear {
+		C.xtest_ctrl_a_backspace(dpy)
+		logger.Debug("clear input done", "method", "x11/XTest+Ctrl+A+Backspace")
+		return nil
+	}
+	C.xtest_ctrl_key(dpy, C.XK_z)
+	logger.Debug("undo done", "method", "x11/XTest+Ctrl+Z")
+	return nil
+}
+
+// sendWaylandChord prefers wtype and falls back to uinput, mirroring the
+// paste path's compositor handling.
+func sendWaylandChord(logger *slog.Logger, clear bool) error {
+	if !isKDEPlasma() {
+		if _, err := exec.LookPath("wtype"); err == nil {
+			cmds := [][]string{{"-M", "ctrl", "-k", "z", "-m", "ctrl"}}
+			if clear {
+				cmds = [][]string{
+					{"-M", "ctrl", "-k", "a", "-m", "ctrl"},
+					{"-k", "BackSpace"},
+				}
+			}
+			ok := true
+			for _, args := range cmds {
+				if err := exec.Command("wtype", args...).Run(); err != nil {
+					ok = false
+					break
+				}
+				time.Sleep(30 * time.Millisecond)
+			}
+			if ok {
+				logger.Debug("chord done", "method", "wayland/wtype", "clear", clear)
+				return nil
+			}
+		}
+	}
+	if err := sendUinputChord(clear); err != nil {
+		return err
+	}
+	logger.Debug("chord done", "method", "wayland/uinput", "clear", clear)
+	return nil
+}
+
+func sendUinputChord(clear bool) error {
+	keyboard, err := uinput.CreateKeyboard(uinputDev, []byte("just-talk virtual keyboard"))
+	if err != nil {
+		return fmt.Errorf("create uinput keyboard: %w", err)
+	}
+	defer keyboard.Close()
+
+	time.Sleep(80 * time.Millisecond)
+	if err := keyboard.KeyDown(uinput.KeyLeftctrl); err != nil {
+		return fmt.Errorf("uinput ctrl down: %w", err)
+	}
+	time.Sleep(keyDelayMs * time.Millisecond)
+
+	key := uinput.KeyZ
+	if clear {
+		key = uinput.KeyA
+	}
+	if err := keyboard.KeyDown(key); err != nil {
+		return fmt.Errorf("uinput key down: %w", err)
+	}
+	time.Sleep(keyDelayMs * time.Millisecond)
+	if err := keyboard.KeyUp(key); err != nil {
+		return fmt.Errorf("uinput key up: %w", err)
+	}
+	time.Sleep(keyDelayMs * time.Millisecond)
+	if err := keyboard.KeyUp(uinput.KeyLeftctrl); err != nil {
+		return fmt.Errorf("uinput ctrl up: %w", err)
+	}
+
+	if clear {
+		time.Sleep(30 * time.Millisecond)
+		if err := keyboard.KeyDown(uinput.KeyBackspace); err != nil {
+			return fmt.Errorf("uinput backspace down: %w", err)
+		}
+		time.Sleep(keyDelayMs * time.Millisecond)
+		if err := keyboard.KeyUp(uinput.KeyBackspace); err != nil {
+			return fmt.Errorf("uinput backspace up: %w", err)
+		}
 	}
 	return nil
 }
