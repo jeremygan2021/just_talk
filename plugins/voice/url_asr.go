@@ -94,23 +94,17 @@ func NewURLASRClient(cfg URLASRConfig, logger *slog.Logger) *URLASRClient {
 	}
 }
 
-// Connect verifies credentials up front. We submit a tiny silent wav and
-// immediately query; any auth or quota error surfaces here rather than
-// after the user has finished dictating.
+// Connect is a near no-op for the file-URL backend: the recording must
+// start instantly when the user presses the hotkey, so we skip the
+// submit/query probe here. Any auth or quota error surfaces inside
+// SendAudio(isLast=true) once the user finishes the recording, which is
+// the natural moment to wait for a network round trip. The only check
+// we keep is a non-empty API key so a misconfigured backend fails fast.
 func (c *URLASRClient) Connect(ctx context.Context) error {
 	if c.cfg.APIKey == "" {
 		return fmt.Errorf("doubao url asr: api key is empty")
 	}
-	silentWav := buildSilentWAV(16000, 1, 1600)
-	b64 := base64.StdEncoding.EncodeToString(silentWav)
-	reqID := uuid.New().String()
-	if err := c.submit(ctx, reqID, b64); err != nil {
-		return fmt.Errorf("doubao url asr: submit probe failed: %w", err)
-	}
-	if _, err := c.query(ctx, reqID); err != nil {
-		return fmt.Errorf("doubao url asr: query probe failed: %w", err)
-	}
-	c.logger.Info("doubao url asr connected", "resource_id", c.cfg.ResourceID)
+	c.logger.Info("doubao url asr ready (lazy connect)", "resource_id", c.cfg.ResourceID)
 	return nil
 }
 
@@ -349,9 +343,4 @@ func buildWAV(pcm []byte, sampleRate, channels int) []byte {
 	binary.Write(&buf, binary.LittleEndian, uint32(len(pcm)))
 	buf.Write(pcm)
 	return buf.Bytes()
-}
-
-func buildSilentWAV(sampleRate, channels int, samples int) []byte {
-	pcm := make([]byte, samples*channels*2)
-	return buildWAV(pcm, sampleRate, channels)
 }
