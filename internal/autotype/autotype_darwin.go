@@ -104,7 +104,7 @@ func sendEnterPlatform(logger *slog.Logger) error {
 }
 
 func sendUndoPlatform(logger *slog.Logger) error {
-	C.cgevent_ctrl_key((C.CGKeyCode)(6)) // kVK_ANSI_Z
+	C.cgevent_ctrl_key(C.CGKeyCode(6)) // kVK_ANSI_Z
 	logger.Debug("undo done", "method", "darwin/CGEventPost+Ctrl+Z")
 	return nil
 }

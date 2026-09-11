@@ -12,6 +12,45 @@ func TestDefaultTripleTap(t *testing.T) {
 	}
 }
 
+func TestDefaultDoubleTap(t *testing.T) {
+	cfg := Default()
+	if !cfg.Voice.DoubleTapUndo {
+		t.Fatal("DoubleTapUndo should default to true")
+	}
+	if cfg.Voice.DoubleTapAction != "undo" {
+		t.Fatalf("DoubleTapAction = %q, want undo", cfg.Voice.DoubleTapAction)
+	}
+}
+
+func TestNormalizeDoubleTapAction(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+		err  bool
+	}{
+		{"", "undo", false},
+		{"undo", "undo", false},
+		{"clear", "clear", false},
+		{"delete", "", true},
+		{"UNDO", "", true},
+	}
+	for _, tc := range cases {
+		got, err := NormalizeDoubleTapAction(tc.in)
+		if tc.err {
+			if err == nil {
+				t.Errorf("NormalizeDoubleTapAction(%q): expected error, got %q", tc.in, got)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("NormalizeDoubleTapAction(%q): unexpected error %v", tc.in, err)
+		}
+		if got != tc.want {
+			t.Errorf("NormalizeDoubleTapAction(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
 func TestNormalizeMode(t *testing.T) {
 	cases := []struct {
 		in   string
