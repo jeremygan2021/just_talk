@@ -220,8 +220,17 @@ func (c *ASRClient) parseResponse(data []byte) {
 		c.lastText = text
 		c.textMu.Unlock()
 		c.resultCh <- ASRResult{Text: text, IsFinal: isFinal}
-		if isFinal {
-			c.finalOnce.Do(func() { close(c.final) })
+	}
+	if isFinal {
+		// An empty final means the ASR engine recognized nothing. Reset
+		// lastText so a previous successful transcript isn't re-dispatched
+		// for this session, and close final so finishRecordingSession does
+		// not wait the 15s ASR timeout.
+		if text == "" {
+			c.textMu.Lock()
+			c.lastText = ""
+			c.textMu.Unlock()
 		}
+		c.finalOnce.Do(func() { close(c.final) })
 	}
 }

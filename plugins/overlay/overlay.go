@@ -16,19 +16,27 @@ import (
 // (latest spoken portion) so the user always sees the freshest words.
 const partialTextMax = 30
 
-// waveformBars is the number of bars rendered in the recording waveform.
-// The recorder keeps 64 amplitude samples; we keep all 64 but the bar
-// rendering averages adjacent pairs to fit `waveformBars` columns.
-const waveformBars = 24
+// overlayFrameInterval is the overlay redraw period. 30 fps keeps the
+// waveform animation smooth; static states are deduplicated and are
+// never redrawn.
+const overlayFrameInterval = 33 * time.Millisecond
+
+// overlayFrame is one rendered frame of the status capsule.
+type overlayFrame struct {
+	// label is the short status text ("REC", "WAI", partial transcript).
+	label string
+	// accent is the color of the round status indicator.
+	accent statusColor
+	// bars holds the animated waveform bar heights in [0,1]. When empty
+	// the backend renders the compact single-row capsule instead.
+	bars []float32
+	// phase is the animation clock in seconds, used for the breathing
+	// glow and the indicator pulse.
+	phase float64
+}
 
 type backend interface {
-	// Show renders the overlay. `label` is the short status text
-	// ("REC", "WAI", partial transcript, etc.). `color` is the dot
-	// color. `levels` is a slice of normalized peak amplitudes
-	// (0..1, oldest first, newest last). When non-empty the backend
-	// is expected to switch to a wider layout that includes a
-	// waveform visualization.
-	Show(label string, color statusColor, levels []float32) error
+	Show(f overlayFrame) error
 	Hide() error
 	Close() error
 }
@@ -43,10 +51,11 @@ type Plugin struct {
 	logger      *slog.Logger
 	cfg         config.OverlayConfig
 	backend     backend
+	animator    *waveformAnimator
 	lastState   string
 	lastLabel   string
 	lastVisible bool
-	lastLevels  []float32
+	lastWide    bool
 }
 
 func NewOverlayPlugin() *Plugin { return &Plugin{} }
@@ -57,6 +66,7 @@ func (p *Plugin) Version() string { return "0.1.0" }
 func (p *Plugin) Init(env engine.PluginEnv) error {
 	p.logger = env.Logger()
 	p.cfg = env.Config().Overlay
+	p.animator = newWaveformAnimator(barCount)
 	return nil
 }
 
@@ -72,15 +82,17 @@ func (p *Plugin) Start(ctx context.Context) error {
 	p.backend = b
 	defer p.backend.Close()
 
-	ticker := time.NewTicker(100 * time.Millisecond)
+	ticker := time.NewTicker(overlayFrameInterval)
 	defer ticker.Stop()
+	started := time.Now()
 	p.logger.Info("overlay started")
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-ticker.C:
-			p.sync(voice.TUIStatus())
+			now := time.Now()
+			p.sync(voice.TUIStatus(), now, now.Sub(started).Seconds())
 		}
 	}
 }
@@ -92,13 +104,32 @@ func (p *Plugin) Stop() error {
 	return nil
 }
 
-func (p *Plugin) sync(status voice.TUIVoiceStatus) {
+func (p *Plugin) sync(status voice.TUIVoiceStatus, now time.Time, phase float64) {
 	label, color, levels, visible := displayForStatus(status, p.cfg.IdleVisible)
-	if status.State == p.lastState && label == p.lastLabel && visible == p.lastVisible && levelsEqual(p.lastLevels, levels) {
+
+	// The waveform row is only shown while audio is (or was just) being
+	// captured: during the recording itself and while the final
+	// transcript is still being waited on. In the waiting states the
+	// animator gets no fresh levels and simply eases the bars flat.
+	wide := waveformState(status.State)
+	var bars []float32
+	if wide {
+		bars = p.animator.Update(now, levels)
+	} else {
+		p.animator.Reset()
+	}
+
+	animating := animatedState(status.State)
+	changed := status.State != p.lastState || label != p.lastLabel ||
+		visible != p.lastVisible || wide != p.lastWide
+
+	// Static states are only repainted when something actually changed;
+	// animated states (recording, gesture confirmation, ...) redraw at
+	// the frame rate so the glow and the bars keep moving.
+	if !changed && !animating {
 		return
 	}
-	p.lastState, p.lastLabel, p.lastVisible = status.State, label, visible
-	p.lastLevels = levels
+	p.lastState, p.lastLabel, p.lastVisible, p.lastWide = status.State, label, visible, wide
 
 	if !visible {
 		if err := p.backend.Hide(); err != nil {
@@ -106,21 +137,32 @@ func (p *Plugin) sync(status voice.TUIVoiceStatus) {
 		}
 		return
 	}
-	if err := p.backend.Show(label, color, levels); err != nil {
+	frame := overlayFrame{label: label, accent: color, bars: bars, phase: phase}
+	if err := p.backend.Show(frame); err != nil {
 		p.logger.Debug("overlay show failed", "error", err)
 	}
 }
 
-func levelsEqual(a, b []float32) bool {
-	if len(a) != len(b) {
+// waveformState reports whether a status renders the two-row capsule
+// with the live waveform.
+func waveformState(state string) bool {
+	switch state {
+	case "recording", "stopping", "stopping_delayed":
+		return true
+	default:
 		return false
 	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
+}
+
+// animatedState reports whether a status is worth redrawing at the frame
+// rate. Idle and error are static: they are drawn once and left alone.
+func animatedState(state string) bool {
+	switch state {
+	case "recording", "stopping", "stopping_delayed", "connecting", "enter", "undo":
+		return true
+	default:
+		return false
 	}
-	return true
 }
 
 func displayForStatus(status voice.TUIVoiceStatus, idleVisible bool) (string, statusColor, []float32, bool) {
@@ -130,7 +172,7 @@ func displayForStatus(status voice.TUIVoiceStatus, idleVisible bool) (string, st
 	case "recording":
 		// Recording: show partial text when streaming ASR has
 		// returned something, otherwise the "REC" abbreviation. The
-		// waveform bars are always present during recording.
+		// waveform row is always present during recording.
 		label := "REC"
 		if t := trimPartial(status.PartialText); t != "" {
 			label = t
@@ -174,71 +216,25 @@ func trimPartial(text string) string {
 	return string(runes)
 }
 
-// truncateLabelWidth finds the longest rune-prefix of label whose
-// bitmap width at the given scale fits inside maxW, and returns the
-// width of that prefix. If label itself fits, the full width is
-// returned. Multi-byte runes (for example Chinese characters) advance
-// the same way drawText advances its cursor: each rune consumes
-// 6*scale pixels.
-//
-// Used by the rendering backends to shrink a long ASR partial
-// transcript down so it fits alongside the dot and the waveform bars
-// in the recording-state capsule.
-func truncateLabelWidth(label string, scale, maxW int) int {
+// clipLabel returns the longest rune-prefix of label that fits in maxW
+// pixels at the given bitmap scale. Multi-byte runes (for example
+// Chinese characters) advance the cursor the same way drawSurfaceText
+// does, so the clipped string never overlaps the waveform beside it.
+func clipLabel(label string, scale, maxW int) string {
 	if bitmapTextWidth(label, scale) <= maxW {
-		return bitmapTextWidth(label, scale)
+		return label
 	}
 	stride := 6 * scale
 	if stride <= 0 {
-		return 0
+		return ""
 	}
 	count := maxW / stride
 	if count <= 0 {
-		return 0
+		return ""
 	}
 	runes := []rune(label)
 	if count >= len(runes) {
-		count = len(runes)
+		return label
 	}
-	return count * stride
-}
-
-// subsampleWaveform reduces a sequence of amplitude samples to
-// waveformBars columns by averaging adjacent windows. The returned
-// slice always has exactly waveformBars entries. Callers may rely on
-// this for sizing the waveform rendering area.
-//
-// When the recorder has fewer samples than waveformBars (very short
-// recordings or first few hundred ms of a session) the leading samples
-// are copied verbatim and the remaining bars are silent. When the
-// recorder has more samples than waveformBars, each output bar
-// represents the average of an evenly-sized input window.
-func subsampleWaveform(samples []float32) []float32 {
-	out := make([]float32, waveformBars)
-	if len(samples) == 0 {
-		return out
-	}
-	if len(samples) <= waveformBars {
-		copy(out, samples)
-		return out
-	}
-	step := float32(len(samples)) / float32(waveformBars)
-	for i := 0; i < waveformBars; i++ {
-		start := int(float32(i) * step)
-		end := int(float32(i+1) * step)
-		if end <= start {
-			end = start + 1
-		}
-		if end > len(samples) {
-			end = len(samples)
-		}
-		var sum float32
-		var count int
-		for j := start; j < end; j++ {
-			sum += samples[j]
-			count++
-		}
-		out[i] = sum / float32(count)
-	}
-	return out
+	return string(runes[:count])
 }

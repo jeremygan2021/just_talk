@@ -81,7 +81,7 @@ Core packages:
 - `internal/doctor/`: startup environment checks.
 - `internal/tui/`: Bubble Tea configuration UI.
 
-The daemon mode holds a `flock(2)` lock at `$XDG_RUNTIME_DIR/just-talk/just-talk.lock` (falling back to `~/.cache/just-talk/`); a second launch is rejected so that hotkeys and `/dev/input/event*` access are never contended.
+Every mode holds the same `flock(2)` lock at `$XDG_RUNTIME_DIR/just-talk/just-talk.lock` (falling back to `~/.cache/just-talk/`), recording `<pid> <mode>`. A new launch replaces a running daemon but refuses to kill a running TUI, so hotkeys and `/dev/input/event*` are never read by two live instances - two instances would record the same utterance and paste the recognized text twice.
 
 ## Hotkey Notes
 

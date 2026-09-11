@@ -15,6 +15,9 @@ config.toml
 # Local reference notes
 /doubao-asr-doc.md
 
+# Locally downloaded system packages used to satisfy cgo build deps
+*.deb
+
 # Editor and OS noise
 .DS_Store
 Thumbs.db

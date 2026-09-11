@@ -23,6 +23,16 @@ const (
 	killPollInterval = 50 * time.Millisecond
 )
 
+// instanceMode records how the lock holder is running. It decides
+// whether a new launch may take the lock over: background daemons are
+// silent and safe to replace, an interactive TUI is not.
+type instanceMode string
+
+const (
+	modeDaemon instanceMode = "daemon"
+	modeTUI    instanceMode = "tui"
+)
+
 // singletonLock represents an acquired single-instance lock.
 //
 // Lock is a held flock(2) on a file inside the user's runtime directory.
@@ -36,21 +46,26 @@ type singletonLock struct {
 
 // acquireSingleton attempts to lock the just-talk runtime file.
 //
-// On success it returns a non-nil lock that the caller must hold for the
-// lifetime of the daemon.
+// `mode` describes the caller (daemon or TUI) and is recorded in the lock
+// file so a later launch knows what it is replacing.
+//
+// On success it returns a non-nil lock that the caller must hold for its
+// whole lifetime.
 //
 // On failure three outcomes are possible:
 //   - The lock is stale (the previous PID is dead, e.g. the previous
 //     instance crashed). The lock file is removed and acquisition is
 //     retried.
-//   - The lock is held by a still-running previous instance. The
-//     previous daemon is asked to exit (SIGTERM, then SIGKILL after
-//     killGraceWindow) and the lock file is removed. Acquisition is
-//     retried so the new launch takes over the global hotkeys and
-//     clipboard dispatch path.
+//   - The lock is held by a running *daemon*. It is asked to exit
+//     (SIGTERM, then SIGKILL after killGraceWindow), the lock file is
+//     removed, and acquisition is retried so the new launch takes over the
+//     global hotkeys and clipboard dispatch path.
+//   - The lock is held by a running *TUI*. Interactive instances are never
+//     killed (that would garble the user's terminal), so an error is
+//     returned instead.
 //   - The lock cannot be opened (permission denied, etc.). An error is
 //     returned and the caller must decide what to do.
-func acquireSingleton() (*singletonLock, error) {
+func acquireSingleton(mode instanceMode) (*singletonLock, error) {
 	dir, err := runtimeDir()
 	if err != nil {
 		return nil, fmt.Errorf("locate runtime dir: %w", err)
@@ -71,7 +86,7 @@ func acquireSingleton() (*singletonLock, error) {
 	// a record of who is *currently* holding the lock; we become
 	// that only after flock(2) returns success.
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err == nil {
-		if err := writeLockPID(f, os.Getpid()); err != nil {
+		if err := writeLockPID(f, os.Getpid(), mode); err != nil {
 			_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
 			_ = f.Close()
 			return nil, fmt.Errorf("write pid to lock: %w", err)
@@ -79,14 +94,17 @@ func acquireSingleton() (*singletonLock, error) {
 		return &singletonLock{path: path, file: f}, nil
 	} else {
 		// Could not acquire the lock. Decide whether the holder is
-		// alive, and if so kill it so we can take over.
-		prevPID, stale := lockFileState(f)
+		// alive, and if so whether we may replace it.
+		prevPID, prevMode, stale := lockFileState(f)
 		f.Close()
 		if stale {
 			if err2 := os.Remove(path); err2 != nil {
 				return nil, fmt.Errorf("remove stale lock: %w", err2)
 			}
-			return acquireSingleton()
+			return acquireSingleton(mode)
+		}
+		if prevMode == modeTUI {
+			return nil, fmt.Errorf("another just-talk is already running in TUI mode (pid %d); close it first", prevPID)
 		}
 		if err := stopPreviousInstance(prevPID, path); err != nil {
 			if err == errSelfLocked {
@@ -97,21 +115,21 @@ func acquireSingleton() (*singletonLock, error) {
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 			return nil, fmt.Errorf("remove lock after kill: %w", err)
 		}
-		return acquireSingleton()
+		return acquireSingleton(mode)
 	}
 }
 
-// writeLockPID truncates the lock file and writes the given PID. It
-// is called only after flock(2) has succeeded, so the file contents
-// reliably identify the current holder.
-func writeLockPID(f *os.File, pid int) error {
+// writeLockPID truncates the lock file and writes "<pid> <mode>". It is
+// called only after flock(2) has succeeded, so the file contents reliably
+// identify the current holder.
+func writeLockPID(f *os.File, pid int, mode instanceMode) error {
 	if _, err := f.Seek(0, 0); err != nil {
 		return err
 	}
 	if err := f.Truncate(0); err != nil {
 		return err
 	}
-	if _, err := fmt.Fprintf(f, "%d\n", pid); err != nil {
+	if _, err := fmt.Fprintf(f, "%d %s\n", pid, mode); err != nil {
 		return err
 	}
 	return f.Sync()
@@ -135,7 +153,7 @@ func stopPreviousInstance(pid int, lockPath string) error {
 	if pid <= 0 {
 		return nil
 	}
-	fmt.Fprintf(os.Stderr, "just-talk: replacing previous daemon (pid %d, lock %s)\n", pid, lockPath)
+	fmt.Fprintf(os.Stderr, "just-talk: replacing previous instance (pid %d, lock %s)\n", pid, lockPath)
 
 	// phaseIsGone encapsulates "is this PID effectively dead yet".
 	// /proc/<pid>/status is more reliable than kill(pid, 0) here:
@@ -249,29 +267,42 @@ func (l *singletonLock) Release() {
 	}
 }
 
-// lockFileState reads the PID stored at the start of f and reports
-// whether the lock is stale (PID missing / not a positive integer /
-// no longer alive). On stale locks the returned pid is meaningless;
-// callers should not act on it.
-func lockFileState(f *os.File) (pid int, stale bool) {
+// lockFileState reads "<pid> <mode>" from the start of f and reports the
+// holder and whether the lock is stale (PID missing / not a positive
+// integer / no longer alive). On stale locks the returned pid is
+// meaningless; callers should not act on it.
+//
+// Lock files written by older builds only contain the PID; those are
+// reported as modeDaemon so they keep the historical replace behaviour.
+func lockFileState(f *os.File) (pid int, mode instanceMode, stale bool) {
 	if _, err := f.Seek(0, 0); err != nil {
-		return 0, true
+		return 0, modeDaemon, true
 	}
 	var read int
-	if _, err := fmt.Fscanln(f, &read); err != nil {
-		return 0, true
+	var modeText string
+	if _, err := fmt.Fscanln(f, &read, &modeText); err != nil && modeText == "" {
+		// Fscanln reports an error when the trailing newline is missing
+		// but still fills in what it read; only fail when nothing was
+		// parsed at all.
+		if read <= 0 {
+			return 0, modeDaemon, true
+		}
+	}
+	mode = modeDaemon
+	if modeText == string(modeTUI) {
+		mode = modeTUI
 	}
 	if read <= 0 {
-		return 0, true
+		return 0, mode, true
 	}
 	if err := syscall.Kill(read, 0); err == nil {
-		return read, false
+		return read, mode, false
 	} else if err == syscall.ESRCH {
-		return read, true
+		return read, mode, true
 	}
 	// EPERM or other unexpected error: treat as alive so the caller
 	// can decide whether to escalate.
-	return read, false
+	return read, mode, false
 }
 
 // isStaleLock keeps the old single-return-value contract used by tests

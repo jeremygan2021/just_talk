@@ -1,8 +1,11 @@
 package overlay
 
 import (
+	"io"
+	"log/slog"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/c/just-talk-go/plugins/voice"
 )
@@ -65,6 +68,21 @@ func TestDisplayForRecordingWithPartial(t *testing.T) {
 	}
 }
 
+// TestStatusLabelsAreDrawable guards the label font: every rune of every
+// status label the overlay can show must exist in the bitmap font,
+// otherwise the capsule renders a blank gap (the old font was missing
+// "L", so IDL showed as "ID").
+func TestStatusLabelsAreDrawable(t *testing.T) {
+	labels := []string{"CON", "REC", "WAI", "STP", "ERR", "IDL", "⏎", "↶", "12:34"}
+	for _, label := range labels {
+		for _, r := range label {
+			if _, ok := glyphs[r]; !ok {
+				t.Errorf("label %q needs a glyph for %q", label, r)
+			}
+		}
+	}
+}
+
 func TestTrimPartial(t *testing.T) {
 	cases := []struct {
 		in, want string
@@ -84,53 +102,188 @@ func TestTrimPartial(t *testing.T) {
 	}
 }
 
-func TestSubsampleWaveform(t *testing.T) {
-	// Input shorter than output: leading samples copied verbatim.
-	got := subsampleWaveform([]float32{0.5, 0.6, 0.7, 0.8})
-	if len(got) != waveformBars {
-		t.Fatalf("subsampleWaveform len = %d, want %d", len(got), waveformBars)
+func TestWaveformState(t *testing.T) {
+	wide := map[string]bool{
+		"recording":        true,
+		"stopping":         true,
+		"stopping_delayed": true,
+		"connecting":       false,
+		"enter":            false,
+		"undo":             false,
+		"error":            false,
+		"idle":             false,
 	}
-	if got[0] != 0.5 || got[1] != 0.6 || got[2] != 0.7 || got[3] != 0.8 {
-		t.Fatalf("leading samples not copied: %v", got[:4])
-	}
-	for i := 4; i < waveformBars; i++ {
-		if got[i] != 0 {
-			t.Fatalf("subsampleWaveform[%d] = %f, want 0", i, got[i])
-		}
-	}
-
-	// Input larger than output: averaged windows.
-	got = subsampleWaveform([]float32{0.0, 1.0, 0.0, 1.0, 0.0, 1.0})
-	// step = 6/24 = 0.25, each bar covers a 0.25-index window. For 6
-	// samples, the first 4 bars take samples 0..3 alternating, then 2..5.
-	if got[0] != 0.0 || got[1] != 1.0 || got[2] != 0.0 || got[3] != 1.0 {
-		t.Fatalf("averaged waveform: %v", got[:6])
-	}
-}
-
-func TestSubsampleWaveformEmpty(t *testing.T) {
-	got := subsampleWaveform(nil)
-	if len(got) != waveformBars {
-		t.Fatalf("subsampleWaveform(nil) len = %d, want %d", len(got), waveformBars)
-	}
-	for i, v := range got {
-		if v != 0 {
-			t.Fatalf("subsampleWaveform(nil)[%d] = %f, want 0", i, v)
+	for state, want := range wide {
+		if got := waveformState(state); got != want {
+			t.Errorf("waveformState(%q) = %v, want %v", state, got, want)
 		}
 	}
 }
 
-func TestLevelsEqual(t *testing.T) {
-	if !levelsEqual(nil, nil) {
-		t.Fatal("nil == nil should be true")
+func TestAnimatedState(t *testing.T) {
+	animated := map[string]bool{
+		"recording":        true,
+		"stopping":         true,
+		"stopping_delayed": true,
+		"connecting":       true,
+		"enter":            true,
+		"undo":             true,
+		"error":            false,
+		"idle":             false,
 	}
-	if levelsEqual(nil, []float32{0}) {
-		t.Fatal("nil vs non-empty should be false")
+	for state, want := range animated {
+		if got := animatedState(state); got != want {
+			t.Errorf("animatedState(%q) = %v, want %v", state, got, want)
+		}
 	}
-	if !levelsEqual([]float32{0.1, 0.2}, []float32{0.1, 0.2}) {
-		t.Fatal("same content should be equal")
+}
+
+// fakeBackend records the frames the plugin asks it to render.
+type fakeBackend struct {
+	frames []overlayFrame
+	hides  int
+}
+
+func (f *fakeBackend) Show(frame overlayFrame) error {
+	cp := frame
+	cp.bars = append([]float32(nil), frame.bars...)
+	f.frames = append(f.frames, cp)
+	return nil
+}
+
+func (f *fakeBackend) Hide() error  { f.hides++; return nil }
+func (f *fakeBackend) Close() error { return nil }
+
+func newTestPlugin() (*Plugin, *fakeBackend) {
+	fb := &fakeBackend{}
+	return &Plugin{
+		logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+		backend:  fb,
+		animator: newWaveformAnimator(barCount),
+	}, fb
+}
+
+func TestSyncRecordingRendersWaveform(t *testing.T) {
+	p, fb := newTestPlugin()
+	now := time.Now()
+
+	p.sync(voice.TUIVoiceStatus{State: "recording", LevelSamples: []float32{0.3}}, now, 0)
+	if len(fb.frames) != 1 {
+		t.Fatalf("frames = %d, want 1", len(fb.frames))
 	}
-	if levelsEqual([]float32{0.1, 0.2}, []float32{0.1, 0.3}) {
-		t.Fatal("different values should not be equal")
+	frame := fb.frames[0]
+	if frame.label != "REC" {
+		t.Fatalf("label = %q, want REC", frame.label)
+	}
+	if len(frame.bars) != barCount {
+		t.Fatalf("bars = %d, want %d", len(frame.bars), barCount)
+	}
+	if maxBarValue(frame.bars) <= 0.05 {
+		t.Fatalf("speech should raise the bars, got %v", frame.bars)
+	}
+}
+
+// TestSyncRecordingWithoutLevelsStillWide pins the layout: the waveform
+// row is present for the whole recording, so the capsule does not jump
+// between one-row and two-row shapes mid-session.
+func TestSyncRecordingWithoutLevelsStillWide(t *testing.T) {
+	p, fb := newTestPlugin()
+	p.sync(voice.TUIVoiceStatus{State: "recording"}, time.Now(), 0)
+	if len(fb.frames) != 1 {
+		t.Fatalf("frames = %d, want 1", len(fb.frames))
+	}
+	if len(fb.frames[0].bars) != barCount {
+		t.Fatalf("bars = %d, want a flat %d-bar row", len(fb.frames[0].bars), barCount)
+	}
+	if maxBarValue(fb.frames[0].bars) != 0 {
+		t.Fatal("a recording without samples must render a flat waveform")
+	}
+}
+
+func TestSyncStoppingDecaysThenFlattens(t *testing.T) {
+	p, fb := newTestPlugin()
+	now := time.Now()
+	for i := 0; i < 10; i++ {
+		now = now.Add(overlayFrameInterval)
+		p.sync(voice.TUIVoiceStatus{State: "recording", LevelSamples: []float32{0.3}}, now, 0)
+	}
+	if maxBarValue(p.animator.bars) < 0.2 {
+		t.Fatal("expected loud bars while recording")
+	}
+
+	// The final wait keeps the waveform row, but the bars must ease flat.
+	now = now.Add(overlayFrameInterval)
+	p.sync(voice.TUIVoiceStatus{State: "stopping"}, now, 0)
+	if len(fb.frames) < 2 {
+		t.Fatal("stopping must still render a frame")
+	}
+	last := fb.frames[len(fb.frames)-1]
+	if len(last.bars) != barCount {
+		t.Fatal("stopping must keep the two-row layout")
+	}
+
+	for i := 0; i < 40; i++ {
+		now = now.Add(overlayFrameInterval)
+		p.sync(voice.TUIVoiceStatus{State: "stopping"}, now, 0)
+	}
+	if maxBarValue(p.animator.bars) != 0 {
+		t.Fatalf("bars must flatten while waiting for the transcript, got %v", p.animator.bars)
+	}
+}
+
+func TestSyncIdleHidesAndResetsAnimator(t *testing.T) {
+	p, fb := newTestPlugin()
+	now := time.Now()
+	p.sync(voice.TUIVoiceStatus{State: "recording", LevelSamples: []float32{0.3}}, now, 0)
+	now = now.Add(overlayFrameInterval)
+	p.sync(voice.TUIVoiceStatus{State: "idle"}, now, 0)
+
+	if fb.hides != 1 {
+		t.Fatalf("hides = %d, want 1", fb.hides)
+	}
+	if !p.animator.Settled() {
+		t.Fatal("leaving the waveform states must reset the animator")
+	}
+}
+
+func TestSyncStaticStateIsNotRedrawn(t *testing.T) {
+	p, fb := newTestPlugin()
+	p.cfg.IdleVisible = true
+	now := time.Now()
+	p.sync(voice.TUIVoiceStatus{State: "idle"}, now, 0)
+	p.sync(voice.TUIVoiceStatus{State: "idle"}, now.Add(overlayFrameInterval), 0)
+	if len(fb.frames) != 1 {
+		t.Fatalf("static idle state redrawn %d times, want 1", len(fb.frames))
+	}
+
+	// Animated states do redraw every frame.
+	p.sync(voice.TUIVoiceStatus{State: "connecting"}, now.Add(2*overlayFrameInterval), 0)
+	p.sync(voice.TUIVoiceStatus{State: "connecting"}, now.Add(3*overlayFrameInterval), 0)
+	if len(fb.frames) != 3 {
+		t.Fatalf("frames = %d, want 3 (idle once + two connecting frames)", len(fb.frames))
+	}
+}
+
+func TestSyncErrorIsStatic(t *testing.T) {
+	p, fb := newTestPlugin()
+	now := time.Now()
+	p.sync(voice.TUIVoiceStatus{State: "error"}, now, 0)
+	p.sync(voice.TUIVoiceStatus{State: "error"}, now.Add(overlayFrameInterval), 0)
+	if len(fb.frames) != 1 {
+		t.Fatalf("error state redrawn %d times, want 1", len(fb.frames))
+	}
+}
+
+func TestSyncLabelChangeRedraws(t *testing.T) {
+	p, fb := newTestPlugin()
+	now := time.Now()
+	p.sync(voice.TUIVoiceStatus{State: "recording", PartialText: "hello"}, now, 0)
+	now = now.Add(overlayFrameInterval)
+	p.sync(voice.TUIVoiceStatus{State: "recording", PartialText: "hello world"}, now, 0)
+	if len(fb.frames) != 2 {
+		t.Fatalf("frames = %d, want 2", len(fb.frames))
+	}
+	if fb.frames[1].label != "hello world" {
+		t.Fatalf("label = %q, want the new partial text", fb.frames[1].label)
 	}
 }

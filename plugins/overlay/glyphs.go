@@ -4,13 +4,13 @@ import "unicode/utf8"
 
 // bitmapTextWidth returns the rendered pixel width of s at the given
 // bitmap scale. Each rune advances the cursor by 6*scale pixels (see
-// drawBitmapText / drawText in backend_x11.go and backend_wayland.go).
-// Rune count, not byte count, is used so multi-byte symbols (for
-// example the Return glyph) measure the same way drawText advances.
+// drawSurfaceText in render.go). Rune count, not byte count, is used so
+// multi-byte symbols (for example the Return glyph) measure the same way
+// the renderer advances. Runes without a glyph still advance by 4*scale
+// (a narrow blank) — see drawSurfaceText.
 //
-// Shared by the Wayland, X11, and stub backends so the overlay label
-// truncation logic in overlay.go can reason about the same width the
-// renderers will paint.
+// Shared by every backend so the overlay label truncation logic in
+// overlay.go can reason about the same width the renderers will paint.
 func bitmapTextWidth(s string, scale int) int {
 	if len(s) == 0 {
 		return 0
@@ -18,28 +18,75 @@ func bitmapTextWidth(s string, scale int) int {
 	return (utf8.RuneCountInString(s)*6 - 1) * scale
 }
 
-// glyphs is the 5x7 pixel font used by the Linux backends. The map
-// only contains the glyphs the overlay actually paints: the status
-// abbreviations (CON, REC, WAI, STP, ERR, IDL), the multi-tap
-// gesture arrows (⏎, ↶), and the digits used for the configuration
-// UI. Anything outside the map advances the cursor by 4*scale (a
-// narrow placeholder) — see drawBitmapText / drawText.
+// glyphs is the 5x7 pixel font used by the overlay. It carries the full
+// printable ASCII range the capsule can display (letters, digits,
+// punctuation and the multi-tap gesture arrows), so status
+// abbreviations, streaming ASR partial text and numbers all render.
 //
-// Lives outside the platform-specific files so overlay.go can use it
-// from any build tag combination.
+// Status labels in use: CON, REC, WAI, STP, ERR, IDL.
+//
+// Living outside the platform-specific files lets overlay.go and the
+// render tests use it from any build tag combination.
 var glyphs = map[rune][7]byte{
 	'A': {0b01110, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001},
+	'B': {0b11110, 0b10001, 0b10001, 0b11110, 0b10001, 0b10001, 0b11110},
 	'C': {0b01110, 0b10001, 0b10000, 0b10000, 0b10000, 0b10001, 0b01110},
 	'D': {0b11110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b11110},
 	'E': {0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b11111},
+	'F': {0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b10000},
+	'G': {0b01110, 0b10001, 0b10000, 0b10111, 0b10001, 0b10001, 0b01111},
+	'H': {0b10001, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001},
 	'I': {0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b11111},
+	'J': {0b00111, 0b00010, 0b00010, 0b00010, 0b00010, 0b10010, 0b01100},
+	'K': {0b10001, 0b10010, 0b10100, 0b11000, 0b10100, 0b10010, 0b10001},
+	'L': {0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b11111},
+	'M': {0b10001, 0b11011, 0b10101, 0b10101, 0b10001, 0b10001, 0b10001},
 	'N': {0b10001, 0b11001, 0b10101, 0b10011, 0b10001, 0b10001, 0b10001},
 	'O': {0b01110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110},
 	'P': {0b11110, 0b10001, 0b10001, 0b11110, 0b10000, 0b10000, 0b10000},
+	'Q': {0b01110, 0b10001, 0b10001, 0b10001, 0b10101, 0b10010, 0b01101},
 	'R': {0b11110, 0b10001, 0b10001, 0b11110, 0b10100, 0b10010, 0b10001},
 	'S': {0b01111, 0b10000, 0b10000, 0b01110, 0b00001, 0b00001, 0b11110},
 	'T': {0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100},
+	'U': {0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110},
+	'V': {0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01010, 0b00100},
 	'W': {0b10001, 0b10001, 0b10001, 0b10101, 0b10101, 0b10101, 0b01010},
+	'X': {0b10001, 0b10001, 0b01010, 0b00100, 0b01010, 0b10001, 0b10001},
+	'Y': {0b10001, 0b10001, 0b01010, 0b00100, 0b00100, 0b00100, 0b00100},
+	'Z': {0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b10000, 0b11111},
+
+	'0': {0b01110, 0b10001, 0b10011, 0b10101, 0b11001, 0b10001, 0b01110},
+	'1': {0b00100, 0b01100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110},
+	'2': {0b01110, 0b10001, 0b00001, 0b00010, 0b00100, 0b01000, 0b11111},
+	'3': {0b11111, 0b00010, 0b00100, 0b00010, 0b00001, 0b10001, 0b01110},
+	'4': {0b00010, 0b00110, 0b01010, 0b10010, 0b11111, 0b00010, 0b00010},
+	'5': {0b11111, 0b10000, 0b11110, 0b00001, 0b00001, 0b10001, 0b01110},
+	'6': {0b00110, 0b01000, 0b10000, 0b11110, 0b10001, 0b10001, 0b01110},
+	'7': {0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b01000, 0b01000},
+	'8': {0b01110, 0b10001, 0b10001, 0b01110, 0b10001, 0b10001, 0b01110},
+	'9': {0b01110, 0b10001, 0b10001, 0b01111, 0b00001, 0b00010, 0b01100},
+
+	'.':  {0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b01100, 0b01100},
+	',':  {0b00000, 0b00000, 0b00000, 0b00000, 0b00110, 0b00100, 0b01000},
+	'!':  {0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00000, 0b00100},
+	'?':  {0b01110, 0b10001, 0b00001, 0b00010, 0b00100, 0b00000, 0b00100},
+	'\'': {0b00100, 0b00100, 0b01000, 0b00000, 0b00000, 0b00000, 0b00000},
+	'"':  {0b01010, 0b01010, 0b01010, 0b00000, 0b00000, 0b00000, 0b00000},
+	'-':  {0b00000, 0b00000, 0b00000, 0b11111, 0b00000, 0b00000, 0b00000},
+	'_':  {0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b11111},
+	':':  {0b00000, 0b01100, 0b01100, 0b00000, 0b01100, 0b01100, 0b00000},
+	';':  {0b00000, 0b01100, 0b01100, 0b00000, 0b00110, 0b00100, 0b01000},
+	'(':  {0b00010, 0b00100, 0b01000, 0b01000, 0b01000, 0b00100, 0b00010},
+	')':  {0b01000, 0b00100, 0b00010, 0b00010, 0b00010, 0b00100, 0b01000},
+	'/':  {0b00001, 0b00010, 0b00010, 0b00100, 0b01000, 0b01000, 0b10000},
+	'+':  {0b00000, 0b00100, 0b00100, 0b11111, 0b00100, 0b00100, 0b00000},
+	'=':  {0b00000, 0b00000, 0b11111, 0b00000, 0b11111, 0b00000, 0b00000},
+	'%':  {0b11001, 0b11010, 0b00010, 0b00100, 0b01000, 0b01011, 0b10011},
+	'&':  {0b01100, 0b10010, 0b10100, 0b01000, 0b10101, 0b10010, 0b01101},
+	'*':  {0b00000, 0b10101, 0b01110, 0b11111, 0b01110, 0b10101, 0b00000},
+	'#':  {0b01010, 0b01010, 0b11111, 0b01010, 0b11111, 0b01010, 0b01010},
+	'@':  {0b01110, 0b10001, 0b10111, 0b10101, 0b10111, 0b10000, 0b01110},
+
 	'⏎': {0b00001, 0b00001, 0b00001, 0b00101, 0b11111, 0b00100, 0b00000},
 	'↶': {0b00000, 0b00011, 0b00100, 0b01000, 0b11111, 0b01000, 0b00100},
 }

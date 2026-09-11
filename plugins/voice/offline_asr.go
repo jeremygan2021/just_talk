@@ -224,7 +224,17 @@ func (c *OfflineASRClient) SendAudio(ctx context.Context, pcm []byte, isLast boo
 
 	// Final chunk: decode the buffered audio.
 	if totalLen == 0 {
-		return nil // silence, nothing to decode
+		// Empty buffer (silent recording, mic muted, hotkey released before
+		// any audio landed). Publish an empty final result so the voice
+		// pipeline does not wait the 15s ASR timeout, and clear lastText so a
+		// previous successful transcript is not re-dispatched as this
+		// session's result.
+		c.mu.Lock()
+		c.lastText = ""
+		c.mu.Unlock()
+		c.resultCh <- ASRResult{Text: "", IsFinal: true}
+		c.finalOnce.Do(func() { close(c.final) })
+		return nil
 	}
 	return c.decodeBuffered(ctx, totalLen)
 }

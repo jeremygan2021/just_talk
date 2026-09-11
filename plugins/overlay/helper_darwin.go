@@ -24,10 +24,13 @@ type helperCommand struct {
 	R     uint16 `json:"r,omitempty"`
 	G     uint16 `json:"g,omitempty"`
 	B     uint16 `json:"b,omitempty"`
-	// Levels is a JSON array of normalized peak amplitudes
-	// (0..1, oldest first, newest last). Non-streaming states pass
-	// nil so the helper keeps the short capsule layout.
-	Levels []float32 `json:"levels,omitempty"`
+	// Bars is a JSON array of animated waveform bar heights (0..1,
+	// left to right). Non-waveform states pass nil so the helper keeps
+	// the compact capsule layout.
+	Bars []float32 `json:"bars,omitempty"`
+	// Phase is the animation clock in seconds; the helper uses it for
+	// the breathing blue glow.
+	Phase float64 `json:"phase,omitempty"`
 }
 
 func RunHelper(position string, scale float64, input io.Reader) error {
@@ -54,17 +57,20 @@ func readHelperCommands(input io.Reader) {
 		}
 		switch cmd.Cmd {
 		case "show":
-			if len(cmd.Levels) == 0 {
+			if len(cmd.Bars) == 0 {
 				label := C.CString(cmd.Label)
 				C.jt_overlay_helper_show(label, C.ushort(cmd.R), C.ushort(cmd.G), C.ushort(cmd.B))
 				C.free(unsafe.Pointer(label))
 			} else {
-				levelsPtr, n := helperLevelPtr(cmd.Levels)
+				barsPtr, n := helperLevelPtr(cmd.Bars)
 				label := C.CString(cmd.Label)
 				C.jt_overlay_helper_show_wide(label,
 					C.ushort(cmd.R), C.ushort(cmd.G), C.ushort(cmd.B),
-					levelsPtr, C.int(n))
+					barsPtr, C.int(n), C.double(cmd.Phase))
 				C.free(unsafe.Pointer(label))
+				if barsPtr != nil {
+					C.free(unsafe.Pointer(barsPtr))
+				}
 			}
 		case "hide":
 			C.jt_overlay_helper_hide()
@@ -77,10 +83,8 @@ func readHelperCommands(input io.Reader) {
 }
 
 // helperLevelPtr copies the Go slice to a C-owned float buffer and
-// returns the pointer + length. The C function is expected to copy
-// the data before returning, so we free the buffer right after the
-// call. We use malloc/free here (rather than C.CBytes) because the
-// float32 -> C double conversion needs explicit sizing.
+// returns the pointer + length. The C function copies the data before
+// returning, so the caller frees the buffer right after the call.
 func helperLevelPtr(levels []float32) (*C.float, C.int) {
 	if len(levels) == 0 {
 		return nil, 0

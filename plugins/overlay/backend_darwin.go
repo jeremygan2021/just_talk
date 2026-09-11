@@ -49,9 +49,17 @@ func newBackend(cfg config.OverlayConfig) (backend, error) {
 	return &darwinBackend{cmd: cmd, stdin: stdin}, nil
 }
 
-func (b *darwinBackend) Show(label string, color statusColor) error {
-	slog.Default().Debug("macOS overlay show", "label", label, "r", color.R, "g", color.G, "b", color.B)
-	return b.send(helperCommand{Cmd: "show", Label: label, R: color.R, G: color.G, B: color.B})
+func (b *darwinBackend) Show(f overlayFrame) error {
+	slog.Default().Debug("macOS overlay show", "label", f.label, "r", f.accent.R, "g", f.accent.G, "b", f.accent.B, "bars", len(f.bars))
+	return b.send(helperCommand{
+		Cmd:   "show",
+		Label: f.label,
+		R:     f.accent.R,
+		G:     f.accent.G,
+		B:     f.accent.B,
+		Bars:  f.bars,
+		Phase: f.phase,
+	})
 }
 
 func (b *darwinBackend) Hide() error {

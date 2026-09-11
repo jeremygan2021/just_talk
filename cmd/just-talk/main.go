@@ -108,6 +108,22 @@ func main() {
 	}
 	logger.Info("provider created", "platform", provider.Info().Platform, "backend", provider.Info().Backend)
 
+	// Single-instance enforcement covers *every* mode, not just the daemon.
+	// Two live instances both register the same global hotkey and both run
+	// the record -> ASR -> paste pipeline, so one utterance is recorded and
+	// pasted twice. The lock is what makes that impossible.
+	mode := modeDaemon
+	if *useTUI {
+		mode = modeTUI
+	}
+	lock, err := acquireSingleton(mode)
+	if err != nil {
+		logger.Error("refusing to start", "error", err)
+		fmt.Fprintf(os.Stderr, "❌ %v\n", err)
+		os.Exit(1)
+	}
+	defer lock.Release()
+
 	eng := engine.New(provider, cfg, logger)
 
 	if *debug && cfg.Debug.Enabled && !*useTUI {
@@ -130,12 +146,6 @@ func main() {
 }
 
 func runDaemon(eng *engine.Engine) {
-	lock, err := acquireSingleton()
-	if err != nil {
-		slog.Error("refusing to start", "error", err)
-		os.Exit(1)
-	}
-	defer lock.Release()
 	slog.Info("just-talk started — use tray icon or Ctrl+C to quit")
 	if err := eng.Start(true); err != nil && err != context.Canceled {
 		slog.Error("engine exited with error", "error", err)

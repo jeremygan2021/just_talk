@@ -30,6 +30,16 @@ const (
 	// undoTapActionUndo / undoTapActionClear select the retract payload.
 	undoTapActionUndo  = "undo"
 	undoTapActionClear = "clear"
+	// defaultASRFinalTimeout bounds how long finishRecordingSession waits for
+	// the backend's final transcript after the last audio packet.
+	defaultASRFinalTimeout = 15 * time.Second
+	// defaultASRNoSpeechTimeout is how long the final wait tolerates a
+	// backend that has produced no partial hypothesis at all. A server that
+	// heard speech normally streams a partial within a second; no partial at
+	// all almost always means the clip was silence (or back-end noise), so we
+	// stop waiting early and return to idle instead of holding WAI for the
+	// full final timeout.
+	defaultASRNoSpeechTimeout = 4 * time.Second
 )
 
 var (
@@ -327,6 +337,11 @@ type VoicePlugin struct {
 	undoAction             string
 	doubleTimer            *time.Timer
 	undoUntil              time.Time
+	// asrFinalTimeout overrides defaultASRFinalTimeout when non-zero. Tests
+	// set it small to exercise the no-final paths without waiting 15s.
+	asrFinalTimeout time.Duration
+	// asrNoSpeechTimeout overrides defaultASRNoSpeechTimeout when non-zero.
+	asrNoSpeechTimeout time.Duration
 }
 
 type recordingSession struct {
@@ -340,7 +355,11 @@ type recordingSession struct {
 }
 
 func NewVoicePlugin() *VoicePlugin {
-	return &VoicePlugin{stopDelayMs: defaultStopDelayMs}
+	return &VoicePlugin{
+		stopDelayMs:        defaultStopDelayMs,
+		asrFinalTimeout:    defaultASRFinalTimeout,
+		asrNoSpeechTimeout: defaultASRNoSpeechTimeout,
+	}
 }
 func (p *VoicePlugin) Name() string    { return "voice" }
 func (p *VoicePlugin) Version() string { return "0.6.0" }
@@ -555,7 +574,15 @@ func (p *VoicePlugin) handleHotkey(evt hotkey.Event) {
 		if !rec {
 			p.startRecording()
 		} else if p.stopping {
-			p.restartRecording()
+			// Pressing again while the stop delay is still running means
+			// "I am not done yet": cancel the pending stop and keep the
+			// same session recording, exactly like hold mode does.
+			//
+			// This must NOT commit the session. The previous behaviour
+			// (finish the in-flight session, then start a fresh one)
+			// dispatched the transcript of the first part *and* recorded
+			// the rest, so a single utterance could be pasted twice.
+			p.cancelStopDelay()
 		} else {
 			p.startStopDelay()
 		}
@@ -925,18 +952,6 @@ func (p *VoicePlugin) connectASR(ctx context.Context, cancel context.CancelFunc,
 	}()
 }
 
-func (p *VoicePlugin) restartRecording() {
-	p.mu.Lock()
-	session := p.detachRecordingLocked()
-	p.trackFinishLocked(session)
-	p.publishStatusLocked()
-	p.mu.Unlock()
-	if session != nil {
-		go p.finishRecordingSession(session)
-	}
-	p.startRecording()
-}
-
 func (p *VoicePlugin) cancelRecording() {
 	p.mu.Lock()
 	session := p.detachRecordingLocked()
@@ -1044,44 +1059,109 @@ func (p *VoicePlugin) finishRecordingSession(session *recordingSession) {
 		session.asrCancel()
 	}
 	var remaining []byte
+	capturedBytes := int64(0)
+	sessionPeak := float32(0)
 	if session.recorder != nil {
 		p.logger.Debug("finish session: stopping recorder")
 		remaining, _ = session.recorder.Stop()
-		p.logger.Debug("finish session: recorder stopped", "remaining_bytes", len(remaining))
+		capturedBytes = session.recorder.CapturedBytes()
+		sessionPeak = session.recorder.SessionPeak()
+		p.logger.Debug("finish session: recorder stopped",
+			"remaining_bytes", len(remaining), "captured_bytes", capturedBytes, "session_peak", sessionPeak)
 	}
 
+	// Skip the ASR round-trip in two cases:
+	//
+	//  1. No audio at all was captured (mic muted, hotkey released before any
+	//     sample landed). This must key off the *total* bytes captured this
+	//     session, not off len(remaining): streamAudio continuously drains the
+	//     capture pipe while the user speaks, so Stop() normally returns only
+	//     the unread tail (often zero) even for a long, loud utterance.
+	//  2. Audio was captured but it never rose above silencePeak, i.e. nobody
+	//     actually spoke. A microphone always produces PCM in a quiet room, so
+	//     the byte count cannot see this; the session peak can.
+	//
+	// Both cases used to keep the overlay on WAI until the backend's final
+	// wait expired, then flash ERR. Skipping the backend entirely makes a
+	// no-speech recording return to idle immediately and keeps a stale
+	// lastText from a previous session out of this session's output.
+	noAudio := capturedBytes == 0 && len(remaining) == 0
+	silentAudio := !noAudio && sessionPeak < silencePeak
+	skipASR := noAudio || silentAudio
+
 	if session.asrClient != nil {
-		p.logger.Debug("finish session: sending final audio", "bytes", len(remaining))
-		sendCtx, sendCancel := context.WithTimeout(context.Background(), 3*time.Second)
-		if len(remaining) > 0 {
+		if !skipASR {
+			p.logger.Debug("finish session: sending final audio", "bytes", len(remaining))
+			sendCtx, sendCancel := context.WithTimeout(context.Background(), 3*time.Second)
 			if err := session.asrClient.SendAudio(sendCtx, remaining, true); err != nil {
 				p.logger.Warn("send final audio failed", "error", err)
 			}
+			sendCancel()
+			p.logger.Debug("finish session: waiting ASR final")
+			finalTimeout := p.asrFinalTimeout
+			if finalTimeout <= 0 {
+				finalTimeout = defaultASRFinalTimeout
+			}
+			noSpeechTimeout := p.asrNoSpeechTimeout
+			if noSpeechTimeout <= 0 {
+				noSpeechTimeout = defaultASRNoSpeechTimeout
+			}
+			// Keep the no-speech grace strictly inside the final timeout so
+			// the two timers cannot race to an ambiguous outcome.
+			if noSpeechTimeout >= finalTimeout {
+				noSpeechTimeout = finalTimeout / 2
+			}
+
+			finalTimer := time.NewTimer(finalTimeout)
+			defer finalTimer.Stop()
+			graceTimer := time.NewTimer(noSpeechTimeout)
+			defer graceTimer.Stop()
+
+			waiting := true
+			for waiting {
+				select {
+				case <-session.asrClient.Final():
+					p.logger.Debug("finish session: ASR final received")
+					waiting = false
+				case <-session.asrClient.Done():
+					p.logger.Debug("finish session: ASR done")
+					waiting = false
+				case <-graceTimer.C:
+					// No partial hypothesis after the grace period: the
+					// backend almost certainly heard nothing. Return to idle
+					// quietly instead of holding WAI for the full timeout.
+					if session.asrClient.LastText() == "" {
+						if !p.sessionCanceled(session.sessionID) {
+							p.logger.Debug("finish session: no partial within no-speech grace")
+							pout("🎤 未检测到语音")
+						}
+						waiting = false
+					}
+					// Otherwise partials arrived: keep waiting for the final.
+				case <-finalTimer.C:
+					if !p.sessionCanceled(session.sessionID) {
+						pout("⚠️  识别超时")
+						p.publishError(fmt.Sprintf("识别超时: 等待 ASR final 超过 %s", finalTimeout), session.sessionID)
+					}
+					waiting = false
+				}
+			}
+			if text := session.asrClient.LastText(); text != "" && session.userStopped && p.claimSessionOutput(session.sessionID) {
+				audioDuration := time.Duration(0)
+				if !session.startedAt.IsZero() {
+					audioDuration = time.Since(session.startedAt)
+				}
+				recordTUIStats(text, audioDuration)
+				p.dispatchTextOutput(text, session.autoSubmit)
+			}
 		} else {
-			if err := session.asrClient.SendAudio(sendCtx, nil, true); err != nil {
-				p.logger.Warn("send final audio marker failed", "error", err)
+			if silentAudio {
+				p.logger.Debug("finish session: silent audio, skipping ASR round-trip",
+					"session_peak", sessionPeak)
+				pout("🎤 未检测到语音")
+			} else {
+				p.logger.Debug("finish session: empty audio, skipping ASR round-trip")
 			}
-		}
-		sendCancel()
-		p.logger.Debug("finish session: waiting ASR final")
-		select {
-		case <-session.asrClient.Final():
-			p.logger.Debug("finish session: ASR final received")
-		case <-session.asrClient.Done():
-			p.logger.Debug("finish session: ASR done")
-		case <-time.After(15 * time.Second):
-			if !p.sessionCanceled(session.sessionID) {
-				pout("⚠️  识别超时")
-				p.publishError("识别超时: 等待 ASR final 超过 15s", session.sessionID)
-			}
-		}
-		if text := session.asrClient.LastText(); text != "" && session.userStopped && p.claimSessionOutput(session.sessionID) {
-			audioDuration := time.Duration(0)
-			if !session.startedAt.IsZero() {
-				audioDuration = time.Since(session.startedAt)
-			}
-			recordTUIStats(text, audioDuration)
-			p.dispatchTextOutput(text, session.autoSubmit)
 		}
 		p.logger.Debug("finish session: closing ASR client")
 		closeDone := make(chan error, 1)

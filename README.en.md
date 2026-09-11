@@ -15,11 +15,13 @@ It is built for people who want to type less and speak more while coding, chatti
 - Global hotkey recording with `toggle` and `hold` modes:
   - `toggle`: tap once to start, tap again to stop.
   - `hold`: hold to record, release to stop (the recording status overlay shows `REC` while the key is held).
+  - In both modes, pressing the hotkey again during the stop buffer (`stop_delay_ms`) cancels the pending stop and keeps the same recording, so one sentence is never pasted as two pieces.
 - Voice hotkeys are limited to keys suitable for global shortcuts: modifiers, function keys, Tab, CapsLock, arrow/navigation keys, and similar non-text keys. Letters, digits, punctuation, Space, and other text-producing keys are rejected.
 - Doubao ASR with three selectable backends: `doubao_url` (recommended, file-URL/base64 upload with a single `x-api-key`), `online` (streaming WebSocket, needs an AppKey + AccessKey pair), and `offline` (local SenseVoice, no network).
 - Clipboard copy and automatic text submission.
 - Multi-tap gestures (on by default): while idle, quickly tap the voice hotkey twice to **send Enter** (the most frequent action, so it gets the easier gesture), and three times to **retract the input** (Ctrl+Z by default, or Ctrl+A then Backspace when configured to clear), so text can be submitted or undone without touching the keyboard. The overlay briefly shows a `⏎` return arrow or a `↶` retract arrow instead of the record dot. Disable either gesture with `double_tap_send` / `triple_tap_undo`, and tune the detection gap with `multi_tap_ms`. They never fire while a recording, ASR finish, or paste is in flight.
-- Always-on-top recording status overlay for Wayland, X11, and macOS.
+- Always-on-top recording status overlay for Wayland, X11, and macOS: `REC` (or the latest streaming transcript) on top and a blue waveform underneath that reacts to the voice and flattens when nobody speaks, inside a capsule with a subtle blue glow.
+- A single instance runs at a time: the daemon and the TUI share one `flock` lock. Starting a daemon replaces a running daemon automatically, and a launch is refused while a TUI is already running, so two instances can never record and paste the same utterance twice.
 - TUI configuration for hotkeys, mode, auto-submit, stop delay, hotwords, LLM, and related settings. The hotkey field supports `c` to record a combo directly without typing the textual representation.
 - ASR hotwords for project names, people names, English terms, and domain-specific vocabulary.
 - Usage statistics for total sessions, total recognized characters, average speed, and recent speed.

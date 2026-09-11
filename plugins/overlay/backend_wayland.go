@@ -113,9 +113,8 @@ func newWaylandBackend(cfg config.OverlayConfig) (backend, error) {
 		scale = 1.0
 	}
 	b := &waylandBackend{display: display, position: cfg.Position, scale: scale}
-	b.w = b.scaled(basePillW)
-	b.h = b.scaled(basePillH)
-	b.margin = b.scaled(baseMargin)
+	b.w, b.h = overlayWindowSize(scale)
+	b.margin = anchorMargin(scaledValue(baseMargin, scale), scale)
 	if b.position == "" {
 		b.position = "top-right"
 	}
@@ -146,13 +145,13 @@ func newWaylandBackend(cfg config.OverlayConfig) (backend, error) {
 	return b, nil
 }
 
-func (b *waylandBackend) Show(label string, color statusColor, levels []float32) error {
+func (b *waylandBackend) Show(f overlayFrame) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.display == nil || b.closed || b.destroyed {
 		return nil
 	}
-	b.draw(label, color, levels)
+	b.draw(f)
 	C.wl_surface_attach(b.surface, b.buffer, 0, 0)
 	C.wl_surface_damage_buffer(b.surface, 0, 0, C.int32_t(b.w), C.int32_t(b.h))
 	C.wl_surface_commit(b.surface)
@@ -299,95 +298,18 @@ func (b *waylandBackend) createBuffer() error {
 	return nil
 }
 
-func (b *waylandBackend) draw(label string, color statusColor, levels []float32) {
+func (b *waylandBackend) draw(f overlayFrame) {
 	clear(b.data)
-	bg := rgba{20, 20, 20, 215}
-	fg := rgba{245, 245, 245, 255}
-	dot := rgba{uint8(color.R >> 8), uint8(color.G >> 8), uint8(color.B >> 8), 255}
-	radius := b.h / 2
-	for y := 0; y < b.h; y++ {
-		for x := 0; x < b.w; x++ {
-			if coverage := waylandRoundedRectCoverage(x, y, b.w, b.h, radius); coverage > 0 {
-				c := bg
-				c.a = uint8(uint16(c.a) * uint16(coverage) / 255)
-				b.setPixel(x, y, c)
-			}
-		}
-	}
-	dotSize := b.scaled(14)
-	gap := b.scaled(14)
-	textScale := b.scaled(3)
-	textW := bitmapTextWidth(label, textScale)
-
-	if len(levels) == 0 {
-		// Short mode: dot + label, centered.
-		contentW := dotSize + gap + textW
-		dotX := (b.w - contentW) / 2
-		if dotX < 0 {
-			dotX = 0
-		}
-		dotY := (b.h - dotSize) / 2
-		b.fillCircleAA(dotX+dotSize/2, dotY+dotSize/2, dotSize/2, dot)
-		textH := 7 * textScale
-		textX := dotX + dotSize + gap
-		textY := (b.h - textH) / 2
-		if maxX := b.w - b.scaled(14) - textW; textX > maxX {
-			textX = maxX
-		}
-		b.drawText(textX, textY, label, textScale, fg)
-		return
-	}
-
-	// Wide mode: dot + label + bars. Center the whole group.
-	bars := subsampleWaveform(levels)
-	barW := b.scaled(2)
-	barGap := b.scaled(1)
-	barsW := len(bars)*barW + (len(bars)-1)*barGap
-	innerPad := b.scaled(14)
-	// Truncate the label so the whole composition still fits the
-	// capsule; the overlay is short for short recordings (REC / WAI)
-	// and long for partial transcript. We allow the label to consume
-	// up to two thirds of the available space, the rest goes to bars.
-	availLabel := (b.w - 2*innerPad - dotSize - gap - gap - barsW) / 2
-	if availLabel < 0 {
-		availLabel = 0
-	}
-	if textW > availLabel {
-		textW = truncateLabelWidth(label, textScale, availLabel)
-	}
-	contentW := dotSize + gap + textW + gap + barsW
-	dotX := (b.w - contentW) / 2
-	if dotX < innerPad {
-		dotX = innerPad
-	}
-	dotY := (b.h - dotSize) / 2
-	b.fillCircleAA(dotX+dotSize/2, dotY+dotSize/2, dotSize/2, dot)
-	textH := 7 * textScale
-	textX := dotX + dotSize + gap
-	textY := (b.h - textH) / 2
-	b.drawText(textX, textY, label, textScale, fg)
-	barsX := textX + textW + gap
-	barH := b.scaled(14)
-	barTop := (b.h - barH) / 2
-	for i, level := range bars {
-		h := int(float32(barH) * level)
-		if h < b.scaled(2) {
-			h = b.scaled(2)
-		}
-		bx := barsX + i*(barW+barGap)
-		for yy := 0; yy < h; yy++ {
-			for xx := 0; xx < barW; xx++ {
-				b.setPixel(bx+xx, barTop+(barH-h)+yy, dot)
-			}
-		}
-	}
+	renderOverlay(waylandSurface{b: b}, f.label, frameAccent(f.accent), f.bars, b.scale, f.phase)
 }
 
-type rgba struct {
-	r, g, b, a uint8
-}
+// waylandSurface adapts the ARGB8888 shm buffer to the shared renderer.
+type waylandSurface struct{ b *waylandBackend }
 
-func (b *waylandBackend) setPixel(x, y int, c rgba) {
+func (s waylandSurface) surfaceSize() (int, int) { return s.b.w, s.b.h }
+
+func (s waylandSurface) putPixel(x, y int, c rgba) {
+	b := s.b
 	if x < 0 || y < 0 || x >= b.w || y >= b.h {
 		return
 	}
@@ -399,61 +321,18 @@ func (b *waylandBackend) setPixel(x, y int, c rgba) {
 	b.data[i+3] = c.a
 }
 
-func (b *waylandBackend) blendPixel(x, y int, c rgba, coverage uint8) {
+func (s waylandSurface) blendPixel(x, y int, c rgba, coverage uint8) {
+	b := s.b
 	if x < 0 || y < 0 || x >= b.w || y >= b.h || coverage == 0 {
 		return
 	}
 	i := (y*b.w + x) * 4
-	a := uint16(coverage)
-	inv := uint16(255 - coverage)
-	b.data[i+0] = uint8((uint16(c.b)*a + uint16(b.data[i+0])*inv) / 255)
-	b.data[i+1] = uint8((uint16(c.g)*a + uint16(b.data[i+1])*inv) / 255)
-	b.data[i+2] = uint8((uint16(c.r)*a + uint16(b.data[i+2])*inv) / 255)
-	b.data[i+3] = 255
-}
-
-func (b *waylandBackend) fillCircleAA(cx, cy, r int, c rgba) {
-	rr := r * r * 16
-	for y := cy - r; y <= cy+r; y++ {
-		for x := cx - r; x <= cx+r; x++ {
-			inside := 0
-			for sy := 0; sy < 4; sy++ {
-				for sx := 0; sx < 4; sx++ {
-					dx := (x-cx)*4 + sx - 1
-					dy := (y-cy)*4 + sy - 1
-					if dx*dx+dy*dy <= rr {
-						inside++
-					}
-				}
-			}
-			if inside > 0 {
-				b.blendPixel(x, y, c, uint8(inside*255/16))
-			}
-		}
-	}
-}
-
-func (b *waylandBackend) drawText(x, y int, s string, scale int, c rgba) {
-	for _, r := range strings.ToUpper(s) {
-		glyph, ok := glyphs[r]
-		if !ok {
-			x += 4 * scale
-			continue
-		}
-		for row, bits := range glyph {
-			for col := 0; col < 5; col++ {
-				if bits&(1<<(4-col)) == 0 {
-					continue
-				}
-				for yy := 0; yy < scale; yy++ {
-					for xx := 0; xx < scale; xx++ {
-						b.setPixel(x+col*scale+xx, y+row*scale+yy, c)
-					}
-				}
-			}
-		}
-		x += 6 * scale
-	}
+	srcA := uint16(c.a) * uint16(coverage) / 255
+	inv := 255 - srcA
+	b.data[i+0] = uint8((uint16(c.b)*srcA + uint16(b.data[i+0])*inv) / 255)
+	b.data[i+1] = uint8((uint16(c.g)*srcA + uint16(b.data[i+1])*inv) / 255)
+	b.data[i+2] = uint8((uint16(c.r)*srcA + uint16(b.data[i+2])*inv) / 255)
+	b.data[i+3] = uint8(srcA + uint16(b.data[i+3])*inv/255)
 }
 
 func (b *waylandBackend) anchor() int {
@@ -496,35 +375,6 @@ func (b *waylandBackend) scaled(v int) int {
 		return 1
 	}
 	return n
-}
-
-func waylandRoundedRectCoverage(x, y, w, h, r int) uint8 {
-	inside := 0
-	const samples = 8
-	for sy := 0; sy < samples; sy++ {
-		for sx := 0; sx < samples; sx++ {
-			if insideWaylandRoundedRectSample(x*samples+sx, y*samples+sy, w*samples, h*samples, r*samples) {
-				inside++
-			}
-		}
-	}
-	return uint8(inside * 255 / (samples * samples))
-}
-
-func insideWaylandRoundedRectSample(x, y, w, h, r int) bool {
-	if x >= r && x < w-r {
-		return true
-	}
-	cx := r
-	if x >= w-r {
-		cx = w - r - 1
-	}
-	cy := r
-	if y >= h/2 {
-		cy = h - r - 1
-	}
-	dx, dy := x-cx, y-cy
-	return dx*dx+dy*dy <= r*r
 }
 
 //export goOverlayRegistryGlobal

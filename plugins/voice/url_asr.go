@@ -35,7 +35,21 @@ type URLASRConfig struct {
 	HTTPTimeout time.Duration
 	PollInitial time.Duration
 	PollMax     time.Duration
+	// PollTimeout bounds the total time spent polling query after a submit.
+	// The auc service reports "no valid speech" for silent clips (see
+	// aucStatusNoSpeech), so this is only a safety net for a task that never
+	// reaches a terminal state; when it expires an empty final is published so
+	// the voice pipeline returns to idle instead of flashing ERR.
+	PollTimeout time.Duration
 }
+
+// X-Api-Status-Code values returned by the auc submit/query endpoints.
+const (
+	aucStatusOK         = "20000000" // result ready
+	aucStatusProcessing = "20000001" // still working, poll again
+	aucStatusFailed     = "20000002" // task failed
+	aucStatusNoSpeech   = "20000003" // normal silence: no valid speech in the audio
+)
 
 // URLASRClient implements ASRBackend using the auc submit/query HTTP API.
 // It buffers the entire recording in PCM, then on SendAudio(isLast=true)
@@ -48,18 +62,24 @@ type URLASRConfig struct {
 // result is resolved inside SendAudio, and Final/Done close together once
 // the final transcript is published.
 type URLASRClient struct {
-	cfg       URLASRConfig
-	logger    *slog.Logger
+	cfg        URLASRConfig
+	logger     *slog.Logger
 	httpClient *http.Client
-	resultCh  chan ASRResult
-	done      chan struct{}
-	final     chan struct{}
-	finalOnce sync.Once
+	resultCh   chan ASRResult
+	done       chan struct{}
+	final      chan struct{}
+	finalOnce  sync.Once
+	// publishWG tracks in-flight publishFinal/publishError calls so Close
+	// can wait for them to drain before closing resultCh. Without this, a
+	// publish that is mid-send when Close runs would panic on a closed
+	// channel and the consumer goroutine launched in voice.connectASR would
+	// never exit.
+	publishWG sync.WaitGroup
 
-	mu        sync.Mutex
-	pcm       []byte
-	lastText  string
-	closed    bool
+	mu       sync.Mutex
+	pcm      []byte
+	lastText string
+	closed   bool
 }
 
 // NewURLASRClient builds a file-based ASR backend. Any zero-value timeouts
@@ -83,6 +103,9 @@ func NewURLASRClient(cfg URLASRConfig, logger *slog.Logger) *URLASRClient {
 	}
 	if cfg.PollMax == 0 {
 		cfg.PollMax = 3 * time.Second
+	}
+	if cfg.PollTimeout == 0 {
+		cfg.PollTimeout = 12 * time.Second
 	}
 	return &URLASRClient{
 		cfg:        cfg,
@@ -143,8 +166,16 @@ func (c *URLASRClient) SendAudio(ctx context.Context, pcm []byte, isLast bool) e
 	return nil
 }
 
+// aucQueryResult is one decoded response from the auc query endpoint.
+type aucQueryResult struct {
+	Text    string
+	Status  string // X-Api-Status-Code, "" when the service omitted it
+	Message string // X-Api-Message, for diagnostics
+}
+
 func (c *URLASRClient) pollAndPublish(reqID string) {
 	delay := c.cfg.PollInitial
+	deadline := time.Now().Add(c.cfg.PollTimeout)
 	for {
 		c.mu.Lock()
 		closed := c.closed
@@ -153,15 +184,40 @@ func (c *URLASRClient) pollAndPublish(reqID string) {
 			return
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), c.cfg.HTTPTimeout)
-		text, err := c.query(ctx, reqID)
+		res, err := c.query(ctx, reqID)
 		cancel()
-		if err != nil {
+
+		switch {
+		case err != nil:
 			c.logger.Warn("doubao url asr: query failed", "req_id", reqID, "error", err)
-		} else if text != "" {
-			c.logger.Debug("doubao url asr: final", "req_id", reqID, "text_len", len(text))
-			c.publishFinal(text)
+		case res.Status == aucStatusNoSpeech:
+			// Normal silence: the service recognised no speech. Terminal with
+			// an empty transcript, so stop polling and let the caller go idle.
+			c.logger.Info("doubao url asr: no valid speech in audio", "req_id", reqID)
+			c.publishFinal("")
+			return
+		case res.Status == aucStatusFailed:
+			c.publishError(fmt.Errorf("doubao url asr: task failed status=%s msg=%s", res.Status, res.Message))
+			return
+		case res.Status == aucStatusOK || (res.Status == "" && res.Text != ""):
+			c.logger.Debug("doubao url asr: final", "req_id", reqID, "text_len", len(res.Text))
+			c.publishFinal(res.Text)
+			return
+		case res.Status != aucStatusProcessing && res.Status != "":
+			// Unknown code: report it rather than polling forever.
+			c.publishError(fmt.Errorf("doubao url asr: unexpected query status=%s msg=%s", res.Status, res.Message))
 			return
 		}
+
+		if time.Now().After(deadline) {
+			// Safety net: the task never reached a terminal state within the
+			// budget. Publish an empty final so finishRecordingSession returns
+			// to idle instead of waiting out its own timeout and showing ERR.
+			c.logger.Warn("doubao url asr: poll budget exhausted", "req_id", reqID)
+			c.publishFinal("")
+			return
+		}
+
 		select {
 		case <-time.After(delay):
 		}
@@ -230,10 +286,13 @@ func (c *URLASRClient) submit(ctx context.Context, reqID, wavB64 string) error {
 	return nil
 }
 
-func (c *URLASRClient) query(ctx context.Context, reqID string) (string, error) {
+// query polls the auc query endpoint once. A blank Status means the service
+// did not send the header; callers then fall back to the text to decide
+// whether the result is terminal.
+func (c *URLASRClient) query(ctx context.Context, reqID string) (aucQueryResult, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.cfg.QueryURL, bytes.NewReader([]byte("{}")))
 	if err != nil {
-		return "", err
+		return aucQueryResult{}, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("x-api-key", c.cfg.APIKey)
@@ -241,19 +300,21 @@ func (c *URLASRClient) query(ctx context.Context, reqID string) (string, error) 
 	req.Header.Set("X-Api-Request-Id", reqID)
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("query %s: %w", c.cfg.QueryURL, err)
+		return aucQueryResult{}, fmt.Errorf("query %s: %w", c.cfg.QueryURL, err)
 	}
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(resp.Body)
+	res := aucQueryResult{
+		Status:  resp.Header.Get("X-Api-Status-Code"),
+		Message: resp.Header.Get("X-Api-Message"),
+	}
 	if resp.StatusCode != http.StatusOK {
-		status := resp.Header.Get("X-Api-Status-Code")
-		msg := resp.Header.Get("X-Api-Message")
 		body := strings.TrimSpace(string(raw))
 		const maxBody = 1024
 		if len(body) > maxBody {
 			body = body[:maxBody] + "...(truncated)"
 		}
-		return "", fmt.Errorf("query http %d status=%s msg=%s body=%s", resp.StatusCode, status, msg, body)
+		return res, fmt.Errorf("query http %d status=%s msg=%s body=%s", resp.StatusCode, res.Status, res.Message, body)
 	}
 	var parsed struct {
 		AudioInfo struct {
@@ -264,27 +325,22 @@ func (c *URLASRClient) query(ctx context.Context, reqID string) (string, error) 
 		} `json:"result"`
 	}
 	if err := json.Unmarshal(raw, &parsed); err != nil {
-		return "", fmt.Errorf("query decode: %w body=%s", err, string(raw))
+		return res, fmt.Errorf("query decode: %w body=%s", err, string(raw))
 	}
-	text := parsed.Result.Text
-	if text != "" {
-		c.mu.Lock()
-		c.lastText = text
-		c.mu.Unlock()
-	}
-	return text, nil
+	res.Text = parsed.Result.Text
+	return res, nil
 }
 
 func (c *URLASRClient) buildRequest() map[string]interface{} {
 	r := map[string]interface{}{
-		"model_name":            "bigmodel",
-		"enable_itn":            true,
-		"enable_punc":           true,
-		"enable_ddc":            false,
-		"enable_speaker_info":   false,
-		"enable_channel_split":  false,
-		"show_utterances":       false,
-		"vad_segment":           false,
+		"model_name":             "bigmodel",
+		"enable_itn":             true,
+		"enable_punc":            true,
+		"enable_ddc":             false,
+		"enable_speaker_info":    false,
+		"enable_channel_split":   false,
+		"show_utterances":        false,
+		"vad_segment":            false,
 		"sensitive_words_filter": "",
 	}
 	if len(c.cfg.Hotwords) > 0 {
@@ -300,15 +356,38 @@ func (c *URLASRClient) buildRequest() map[string]interface{} {
 
 func (c *URLASRClient) publishFinal(text string) {
 	c.mu.Lock()
-	if text != "" {
-		c.lastText = text
+	if c.closed {
+		c.mu.Unlock()
+		return
 	}
+	// Register with the publishWG *under* the lock so Close's
+	// c.publishWG.Wait() cannot observe a counter that excludes an
+	// in-flight publish (which would close(c.resultCh) while we are still
+	// sending on it). Close also takes c.mu before calling Wait(), so the
+	// happens-before ordering through the mutex keeps the wait-group
+	// balanced.
+	c.publishWG.Add(1)
+	defer c.publishWG.Done()
+	// Always reflect the latest final result, including an empty one. Leaving
+	// lastText at the previous session's transcript would cause
+	// finishRecordingSession to re-dispatch stale text on a silent recording.
+	c.lastText = text
 	c.mu.Unlock()
+
 	c.resultCh <- ASRResult{Text: text, IsFinal: true}
 	c.finalOnce.Do(func() { close(c.final) })
 }
 
 func (c *URLASRClient) publishError(err error) {
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return
+	}
+	c.publishWG.Add(1)
+	defer c.publishWG.Done()
+	c.mu.Unlock()
+
 	c.resultCh <- ASRResult{Error: err, IsFinal: true}
 	c.finalOnce.Do(func() { close(c.final) })
 }
@@ -342,6 +421,10 @@ func (c *URLASRClient) Close() error {
 	default:
 		close(c.done)
 	}
+	// Drain in-flight publishes before closing resultCh so the consumer
+	// goroutine launched in voice.connectASR exits cleanly.
+	c.publishWG.Wait()
+	close(c.resultCh)
 	return nil
 }
 
