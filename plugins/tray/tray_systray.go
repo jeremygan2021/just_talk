@@ -85,10 +85,24 @@ func initMenu(eng *engine.Engine, logger *slog.Logger) {
 				}
 			case <-mQuit.ClickedCh:
 				logger.Info("quit requested from tray")
-				systray.Quit()
 				if eng != nil {
 					eng.Stop()
 				}
+				// Force-exit after a brief grace period. The graceful
+				// shutdown path (eng.Stop → cancel ctx → providers
+				// return → runDaemon returns → main exits) is correct
+				// in principle, but on Linux the systray library can
+				// leave the main event loop in a state where the
+				// registry never returns, so the daemon hangs in the
+				// background after Quit. Force exit guarantees Quit
+				// always kills the daemon.
+				//
+				// The 500ms delay gives cleanup (singleton lock
+				// release, recorder close, overlay hide) a chance to
+				// run before we tear everything down.
+				time.AfterFunc(500*time.Millisecond, func() {
+					os.Exit(0)
+				})
 				return
 			}
 		}
