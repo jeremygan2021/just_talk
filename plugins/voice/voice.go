@@ -254,7 +254,7 @@ type VoicePlugin struct {
 	sessionID              uint64
 	sessionGen             uint64
 	recorder               *Recorder
-	asrClient              *ASRClient
+	asrClient              ASRBackend
 	asrCancel              context.CancelFunc
 	autoSubmit             bool
 	stopDelayMs            int
@@ -268,19 +268,22 @@ type VoicePlugin struct {
 	flowActive             bool
 	cancelHotkeyRegistered bool
 	retryHotkeyRegistered  bool
+
 }
 
 type recordingSession struct {
 	sessionID   uint64
 	recorder    *Recorder
-	asrClient   *ASRClient
+	asrClient   ASRBackend
 	asrCancel   context.CancelFunc
 	autoSubmit  bool
 	userStopped bool
 	startedAt   time.Time
 }
 
-func NewVoicePlugin() *VoicePlugin     { return &VoicePlugin{stopDelayMs: defaultStopDelayMs} }
+func NewVoicePlugin() *VoicePlugin {
+	return &VoicePlugin{stopDelayMs: defaultStopDelayMs}
+}
 func (p *VoicePlugin) Name() string    { return "voice" }
 func (p *VoicePlugin) Version() string { return "0.6.0" }
 
@@ -332,12 +335,17 @@ func (p *VoicePlugin) registerFromConfig(cfg *config.Config) error {
 	if err != nil {
 		return fmt.Errorf("parse hotkey %q: %w", vc.PushToTalk, err)
 	}
-	mode := vc.Mode
-	if mode == "" {
-		mode = "hold"
+	mode, err := config.NormalizeMode(vc.Mode)
+	if err != nil {
+		return err
 	}
 	if err := validateVoiceHotkey(combo); err != nil {
 		return err
+	}
+
+	stopDelayMs := vc.StopDelayMs
+	if stopDelayMs <= 0 {
+		stopDelayMs = defaultStopDelayMs
 	}
 
 	p.mu.Lock()
@@ -347,11 +355,11 @@ func (p *VoicePlugin) registerFromConfig(cfg *config.Config) error {
 	p.combo = combo
 	p.mode = mode
 	p.autoSubmit = vc.AutoSubmit
-	p.stopDelayMs = vc.StopDelayMs
+	p.stopDelayMs = stopDelayMs
 	p.mu.Unlock()
 
 	p.logger.Info("config_reloaded", "hotkey", combo, "mode", mode,
-		"auto_submit", vc.AutoSubmit, "stop_delay_ms", vc.StopDelayMs)
+		"auto_submit", vc.AutoSubmit, "stop_delay_ms", stopDelayMs)
 
 	if !sameRegistration {
 		isOld := oldCombo.Key != hotkey.KeyNone || oldCombo.Mods != hotkey.ModNone
@@ -362,7 +370,7 @@ func (p *VoicePlugin) registerFromConfig(cfg *config.Config) error {
 		if err := p.env.RegisterHotkeyWithOptions(combo, opts, p.onHotkey); err != nil {
 			return fmt.Errorf("register hotkey: %w", err)
 		}
-		p.logger.Info("hotkey_registered", "combo", combo, "suppress", opts.Suppress)
+		p.logger.Info("hotkey_registered", "combo", combo, "suppress", opts.Suppress, "mode", mode)
 	}
 	return nil
 }
@@ -557,8 +565,50 @@ func (p *VoicePlugin) startRecording() {
 	}
 }
 
+func (p *VoicePlugin) newBackend(asrCfg ASRConfig) ASRBackend {
+	switch p.cfg.Voice.ASRBackend {
+	case "offline":
+		off := OfflineASRConfig{
+			ModelDir: p.cfg.Voice.OfflineModelDir,
+			Script:   p.cfg.Voice.OfflineScript,
+		}
+		// Sensible local defaults when the TUI leaves them empty.
+		if off.ModelDir == "" && fileExists("/home/kali/sherpa-models/sense-voice/model.int8.onnx") {
+			off.ModelDir = "/home/kali/sherpa-models/sense-voice"
+		}
+		if off.Script == "" && fileExists("/home/kali/dev/keliv2.0_view/scripts/asr_text.py") {
+			off.Script = "/home/kali/dev/keliv2.0_view/scripts/asr_text.py"
+		}
+		return NewOfflineASRClient(off, p.logger)
+	case "doubao_url":
+		// "auc" file-URL endpoint. Uses a single x-api-key header (the
+		// WebSocket streaming AppKey/AccessKey pair is not interchangeable).
+		apiKey := p.cfg.Voice.DoubaoAPIKey
+		if apiKey == "" {
+			apiKey = asrCfg.AppKey
+		}
+		resourceID := p.cfg.Voice.DoubaoResourceID
+		if resourceID == "" {
+			resourceID = "volc.seedasr.auc"
+		}
+		return NewURLASRClient(URLASRConfig{
+			APIKey:     apiKey,
+			ResourceID: resourceID,
+			Language:   p.cfg.Voice.Language,
+			Hotwords:   p.cfg.Voice.Hotwords,
+		}, p.logger)
+	default:
+		return NewASRClient(asrCfg, p.logger)
+	}
+}
+
+func fileExists(path string) bool {
+	fi, err := os.Stat(path)
+	return err == nil && !fi.IsDir()
+}
+
 func (p *VoicePlugin) connectASR(ctx context.Context, cancel context.CancelFunc, sessionID, sessionGen uint64, rec *Recorder, asrCfg ASRConfig) {
-	client := NewASRClient(asrCfg, p.logger)
+	client := p.newBackend(asrCfg)
 	if err := client.Connect(ctx); err != nil {
 		wasCanceled := ctx.Err() != nil
 		cancel()
@@ -594,7 +644,7 @@ func (p *VoicePlugin) connectASR(ctx context.Context, cancel context.CancelFunc,
 	p.publishStatusLocked()
 	p.mu.Unlock()
 
-	go client.ReceiveLoop(ctx)
+	client.StartReceive(ctx)
 	go p.streamAudio(ctx, rec, client)
 	go func() {
 		for result := range client.Results() {
@@ -931,6 +981,10 @@ func validateVoiceHotkey(combo hotkey.Combo) error {
 }
 
 func (p *VoicePlugin) syncTransientHotkeysLocked(needCancel, needRetry bool) {
+	// No-op when running under unit tests where env is not wired up.
+	if p.env == nil {
+		return
+	}
 	if needCancel && !p.cancelHotkeyRegistered {
 		if err := p.env.RegisterHotkey(cancelRecordingCombo, p.onCancelHotkey); err != nil {
 			p.logger.Warn("register cancel hotkey failed", "combo", cancelRecordingCombo, "error", err)
@@ -978,7 +1032,7 @@ func asrConnectErrorDetail(err error) string {
 	return shortError(err)
 }
 
-func (p *VoicePlugin) streamAudio(ctx context.Context, rec *Recorder, client *ASRClient) {
+func (p *VoicePlugin) streamAudio(ctx context.Context, rec *Recorder, client ASRBackend) {
 	buf := make([]byte, 6400)
 	for {
 		select {

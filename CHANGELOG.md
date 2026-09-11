@@ -4,6 +4,10 @@ All notable project changes are tracked here.
 
 ## Unreleased
 
+- Added a new `doubao_url` ASR backend that uses the Doubao/Volcano `auc` submit+query HTTP endpoint with a single `x-api-key`. This is the official replacement for the streaming WebSocket `sauc` AppKey/AccessKey credentials and works with the seedasr.auc token pair. The backend buffers PCM, wraps the recording in a WAV container, base64-encodes it, submits it, then polls the query endpoint until the final transcript is returned. No partial results are emitted, but latency from stop to text is typically under three seconds.
+- Removed the `press` hotkey mode and its associated LLM polish pipeline. The voice plugin now supports only `hold` (press and hold to record, release to stop) and `toggle` (press once to start, press again to stop). The recording status overlay continues to display the `REC` indicator while a recording is in flight, matching the pre-`press` behavior.
+- Added an optional OpenAI-compatible LLM polish step (`[llm]` in config). When `mode = "press"` and the recording was started via a short press, the ASR result is routed through the LLM before being pasted. LLM failures fall back to pasting the raw ASR text and surface a one-line warning.
+- Added a hotkey capture mode in the TUI: pressing `c` while editing the 热键 field listens for the next global key combo and stores it as the new hotkey, replacing manual text input.
 - Clarified README build and install setup steps for the repository directory and `~/.local/bin` PATH.
 - Restricted voice hotkeys to non-text global shortcut keys, rejecting letters, digits, punctuation, Space, and similar text-producing keys.
 - Avoid duplicate auto-submit on KDE Plasma by using uinput directly and not writing the Wayland primary selection there.

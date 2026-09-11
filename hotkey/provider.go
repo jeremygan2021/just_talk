@@ -52,6 +52,14 @@ type Provider interface {
 
 	// Info returns metadata about the provider.
 	Info() ProviderInfo
+
+	// Capture blocks until the user presses a key combo or ctx is cancelled.
+	// It returns the captured Combo. Implementations must surface the full
+	// modifier mask of any keys currently held when the trigger key goes
+	// down. A bare modifier release (e.g. tapping Ctrl by itself) yields a
+	// Combo with Key == KeyNone and Mods reflecting the released modifier.
+	// Capture is single-shot; each call returns exactly one Combo.
+	Capture(ctx context.Context) (Combo, error)
 }
 
 type RegisterOptions struct {

@@ -12,12 +12,14 @@ It is built for people who want to type less and speak more while coding, chatti
 
 ## Features
 
-- Global hotkey recording with `toggle` and `hold` modes.
+- Global hotkey recording with `toggle` and `hold` modes:
+  - `toggle`: tap once to start, tap again to stop.
+  - `hold`: hold to record, release to stop (the recording status overlay shows `REC` while the key is held).
 - Voice hotkeys are limited to keys suitable for global shortcuts: modifiers, function keys, Tab, CapsLock, arrow/navigation keys, and similar non-text keys. Letters, digits, punctuation, Space, and other text-producing keys are rejected.
-- Doubao streaming ASR with optimized bidirectional streaming and second-pass recognition.
+- Doubao ASR with three selectable backends: `doubao_url` (recommended, file-URL/base64 upload with a single `x-api-key`), `online` (streaming WebSocket, needs an AppKey + AccessKey pair), and `offline` (local SenseVoice, no network).
 - Clipboard copy and automatic text submission.
 - Always-on-top recording status overlay for Wayland, X11, and macOS.
-- TUI configuration for hotkeys, mode, auto-submit, stop delay, hotwords, and related settings.
+- TUI configuration for hotkeys, mode, auto-submit, stop delay, hotwords, LLM, and related settings. The hotkey field supports `c` to record a combo directly without typing the textual representation.
 - ASR hotwords for project names, people names, English terms, and domain-specific vocabulary.
 - Usage statistics for total sessions, total recognized characters, average speed, and recent speed.
 
@@ -124,6 +126,17 @@ Hotword example:
 [voice]
 hotwords = ["Wayland", "Sway", "wl-copy", "wtype", "just-talk-go"]
 ```
+
+`doubao_url` backend (recommended, single `volc.seedasr.auc` token):
+
+```toml
+[voice]
+asr_backend = "doubao_url"
+doubao_api_key = "e929586a-7b5f-4584-8392-5fe1bb79ddc7"
+doubao_resource_id = "volc.seedasr.auc"
+```
+
+This backend buffers the whole recording, base64-encodes it as a WAV blob, submits it to the `auc` submit endpoint, then polls the `query` endpoint until the final transcript is ready. No interim transcripts are emitted, but stop-to-text latency is typically under three seconds.
 
 macOS hotkey example:
 

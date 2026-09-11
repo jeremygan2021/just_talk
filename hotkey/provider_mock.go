@@ -10,15 +10,17 @@ import (
 // MockProvider is a mock hotkey provider for testing.
 // It allows programmatic injection of hotkey events.
 type MockProvider struct {
-	mu       sync.Mutex
-	channels map[Combo]chan<- Event
-	stopped  bool
+	mu        sync.Mutex
+	channels  map[Combo]chan<- Event
+	captureCh []chan Combo
+	stopped   bool
 }
 
 // NewMockProvider creates a new MockProvider.
 func NewMockProvider() *MockProvider {
 	return &MockProvider{
-		channels: make(map[Combo]chan<- Event),
+		channels:  make(map[Combo]chan<- Event),
+		captureCh: nil,
 	}
 }
 
@@ -95,6 +97,35 @@ func (m *MockProvider) Info() ProviderInfo {
 	}
 }
 
+// Capture blocks until the test harness injects a combo via SimulateKey*.
+// Tests typically use a short-lived context to avoid hanging.
+func (m *MockProvider) Capture(ctx context.Context) (Combo, error) {
+	ch := make(chan Combo, 4)
+	m.mu.Lock()
+	if m.stopped {
+		m.mu.Unlock()
+		return Combo{}, fmt.Errorf("provider is stopped")
+	}
+	m.captureCh = append(m.captureCh, ch)
+	m.mu.Unlock()
+	defer func() {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		for i, c := range m.captureCh {
+			if c == ch {
+				m.captureCh = append(m.captureCh[:i], m.captureCh[i+1:]...)
+				break
+			}
+		}
+	}()
+	select {
+	case combo := <-ch:
+		return combo, nil
+	case <-ctx.Done():
+		return Combo{}, ctx.Err()
+	}
+}
+
 // Simulate sends a hotkey event to all registered channels that match the combo.
 // This is the primary testing API.
 func (m *MockProvider) Simulate(combo Combo, eventType EventType) {
@@ -112,6 +143,20 @@ func (m *MockProvider) Simulate(combo Combo, eventType EventType) {
 		case ch <- evt:
 		default:
 			// Channel full, drop event (test should use buffered channels)
+		}
+	}
+}
+
+// SimulateCapture injects a combo to any active Capture() waiter. Tests call
+// this in lieu of real keyboard events.
+func (m *MockProvider) SimulateCapture(combo Combo) {
+	m.mu.Lock()
+	waiters := append([]chan Combo(nil), m.captureCh...)
+	m.mu.Unlock()
+	for _, ch := range waiters {
+		select {
+		case ch <- combo:
+		default:
 		}
 	}
 }

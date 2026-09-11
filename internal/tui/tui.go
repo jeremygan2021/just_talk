@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"time"
@@ -35,6 +36,7 @@ const (
 	fString fieldType = iota
 	fToggle
 	fSelect
+	fHotkey
 )
 
 type field struct {
@@ -48,6 +50,13 @@ type field struct {
 	optIdx  int
 }
 
+type captureResultMsg struct {
+	combo hotkey.Combo
+	err   error
+}
+
+type captureCancelMsg struct{}
+
 type Model struct {
 	w, h        int
 	ready       bool
@@ -58,22 +67,32 @@ type Model struct {
 	debug       bool
 	showLogs    bool
 	OnSave      func(*config.Config) error
+	OnCapture   func(ctx context.Context) (hotkey.Combo, error)
 	fields      []field
 	cursor      int
 	editing     bool
 	helpVisible bool
 	logExpanded bool
+	capturing   bool
+	captureKey  string // field key currently in capture mode, if any
 }
 
 func New(cfg *config.Config) *Model {
 	vc := cfg.Voice
-	ti := func(v string) textinput.Model { t := textinput.New(); t.SetValue(v); t.Cursor.Blink = false; return t }
+	ti := func(v string) textinput.Model {
+		t := textinput.New()
+		t.SetValue(v)
+		t.Cursor.Blink = false
+		return t
+	}
 	fs := []field{
 		{label: "语音输入", key: "enabled", help: "关闭后不注册热键", fType: fToggle, boolVal: vc.Enabled},
-		{label: "热键", key: "push_to_talk", help: "例: Alt+Super / F9 / Ctrl+Alt+Tab；不支持字母、数字、标点、空格等普通字符键", fType: fString, input: ti(vc.PushToTalk)},
-		{label: "模式", key: "mode", help: "toggle 切换 / hold 按住", fType: fSelect, opts: []string{"toggle", "hold"}, optIdx: idxOf([]string{"toggle", "hold"}, vc.Mode)},
-		{label: "App Key", key: "app_key", help: "火山 App ID", fType: fString, input: ti(vc.AppKey)},
-		{label: "Access Key", key: "access_key", help: "火山 Access Token", fType: fString, input: ti(vc.AccessKey)},
+		{label: "热键", key: "push_to_talk", help: "例: Alt+Super / F9 / Ctrl+Alt+Tab；不支持字母、数字、标点、空格等普通字符键；按 c 直接录制组合键", fType: fHotkey, input: ti(vc.PushToTalk)},
+		{label: "模式", key: "mode", help: "toggle 按两次切开始/停止 / hold 按住录音松开转写", fType: fSelect, opts: []string{"toggle", "hold"}, optIdx: idxOf([]string{"toggle", "hold"}, vc.Mode)},
+		{label: "识别引擎", key: "asr_backend", help: "online 流式 WebSocket / doubao_url 文件 URL (推荐) / offline 本机 SenseVoice(离线)", fType: fSelect, opts: []string{"online", "doubao_url", "offline"}, optIdx: idxOf([]string{"online", "doubao_url", "offline"}, vc.ASRBackend)},
+		{label: "App Key", key: "app_key", help: "online 后端: 火山 App ID", fType: fString, input: ti(vc.AppKey)},
+		{label: "Access Key", key: "access_key", help: "online 后端: 火山 Access Token", fType: fString, input: ti(vc.AccessKey)},
+		{label: "豆包 API Key", key: "doubao_api_key", help: "doubao_url 后端: volc.seedasr.auc 的 x-api-key", fType: fString, input: ti(vc.DoubaoAPIKey)},
 		{label: "自动上屏", key: "auto_submit", help: "识别后自动粘贴", fType: fToggle, boolVal: vc.AutoSubmit},
 		{label: "停止延迟(ms)", key: "stop_delay_ms", help: "松手后补录毫秒", fType: fString, input: ti(fmt.Sprintf("%d", vc.StopDelayMs))},
 		{label: "热词", key: "hotwords", help: "逗号分隔术语", fType: fString, input: ti(strings.Join(vc.Hotwords, ", "))},
@@ -112,6 +131,30 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.devices = msg.Devices
 		}
+	case captureResultMsg:
+		m.capturing = false
+		key := m.captureKey
+		m.captureKey = ""
+		if msg.err != nil {
+			m.logf("❌ 热键捕获失败: %s", msg.err)
+			return m, nil
+		}
+		combo := msg.combo
+		if combo.Key.IsTextKey() {
+			m.logf("⚠️  捕获到 %s，普通字符键不能作为语音热键，请重试", combo)
+			return m, nil
+		}
+		comboStr := combo.String()
+		for i := range m.fields {
+			if m.fields[i].key == key {
+				m.fields[i].input.SetValue(comboStr)
+				m.logf("✅ 已捕获热键: %s", comboStr)
+				break
+			}
+		}
+	case captureCancelMsg:
+		m.capturing = false
+		m.captureKey = ""
 	}
 	return m, nil
 }
@@ -125,11 +168,15 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 		switch k {
 		case "esc":
 			m.editing = false
-			f.input.Blur()
+			if f.fType == fString || f.fType == fHotkey {
+				f.input.Blur()
+			}
 			return nil
 		case "enter":
 			m.editing = false
-			f.input.Blur()
+			if f.fType == fString || f.fType == fHotkey {
+				f.input.Blur()
+			}
 			m.save()
 			return nil
 		}
@@ -162,6 +209,23 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 			var cmd tea.Cmd
 			f.input, cmd = f.input.Update(msg)
 			return cmd
+		case fHotkey:
+			// 'c' starts a global capture session, overriding the raw text
+			// input. While in capture mode the raw keystrokes are not
+			// routed back into the textinput.
+			if k == "c" || k == "C" {
+				if !m.capturing {
+					return m.startCapture(f.key)
+				}
+				return nil
+			}
+			if m.capturing && m.captureKey == f.key {
+				// Ignore other keys while waiting for a global combo.
+				return nil
+			}
+			var cmd tea.Cmd
+			f.input, cmd = f.input.Update(msg)
+			return cmd
 		}
 		return nil
 	}
@@ -169,19 +233,33 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 	// Navigation mode
 	switch k {
 	case "q", "ctrl+c":
+		if m.capturing {
+			m.logf("⚠️  热键捕获中，请先按 Esc 取消")
+			return nil
+		}
 		return tea.Quit
 	case "s":
+		if m.capturing {
+			m.logf("⚠️  热键捕获中，请先按 Esc 取消")
+			return nil
+		}
 		m.save()
 		return nil
 	case "e", "i", "enter":
+		if m.capturing {
+			return nil
+		}
 		m.editing = true
 		if m.cursor < 0 {
 			m.cursor = 0
 		}
-		if m.fields[m.cursor].fType == fString {
+		if m.fields[m.cursor].fType == fString || m.fields[m.cursor].fType == fHotkey {
 			m.fields[m.cursor].input.Focus()
 		}
 	case "j", "down":
+		if m.capturing {
+			return nil
+		}
 		if m.cursor < 0 {
 			m.cursor = 0
 		} else {
@@ -191,6 +269,9 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 			}
 		}
 	case "k", "up":
+		if m.capturing {
+			return nil
+		}
 		if m.cursor < 0 {
 			m.cursor = 0
 		} else {
@@ -205,8 +286,40 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 		}
 	case "h":
 		m.helpVisible = !m.helpVisible
+	case "esc":
+		if m.capturing {
+			m.capturing = false
+			m.captureKey = ""
+			m.logf("热键捕获已取消")
+			return nil
+		}
 	}
 	return nil
+}
+
+// startCapture arms the global hotkey provider for capture and returns a
+// tea.Cmd that resolves to captureResultMsg. The OnCapture callback is
+// expected to block until a combo is observed or ctx is cancelled.
+func (m *Model) startCapture(fieldKey string) tea.Cmd {
+	if m.OnCapture == nil {
+		m.logf("❌ 热键捕获不可用：未注册 OnCapture 回调")
+		return nil
+	}
+	m.capturing = true
+	m.captureKey = fieldKey
+	m.logf("🎯 热键捕获中… 请按下想要的热键 (按 Esc 取消)")
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		combo, err := m.OnCapture(ctx)
+		if err != nil {
+			if err == context.DeadlineExceeded {
+				return captureResultMsg{err: fmt.Errorf("超时未检测到按键")}
+			}
+			return captureResultMsg{err: err}
+		}
+		return captureResultMsg{combo: combo}
+	}
 }
 func (m *Model) save() {
 	next := *m.cfg
@@ -219,10 +332,14 @@ func (m *Model) save() {
 			vc.PushToTalk = f.input.Value()
 		case "mode":
 			vc.Mode = f.opts[f.optIdx]
+		case "asr_backend":
+			vc.ASRBackend = f.opts[f.optIdx]
 		case "app_key":
 			vc.AppKey = f.input.Value()
 		case "access_key":
 			vc.AccessKey = f.input.Value()
+		case "doubao_api_key":
+			vc.DoubaoAPIKey = f.input.Value()
 		case "auto_submit":
 			vc.AutoSubmit = f.boolVal
 		case "stop_delay_ms":
@@ -231,6 +348,12 @@ func (m *Model) save() {
 			vc.Hotwords = splitList(f.input.Value())
 		}
 	}
+	mode, err := config.NormalizeMode(vc.Mode)
+	if err != nil {
+		m.logf("❌ %s", err)
+		return
+	}
+	vc.Mode = mode
 	combo, err := config.ParseHotkey(vc.PushToTalk)
 	if err != nil {
 		m.logf("❌ 热键格式错误: %s", err)
@@ -249,7 +372,7 @@ func (m *Model) save() {
 	} else {
 		m.logf("✅ 配置已保存到 %s", config.FindConfig())
 	}
-	m.logf("  push_to_talk=%s", vc.PushToTalk)
+	m.logf("  push_to_talk=%s mode=%s", vc.PushToTalk, vc.Mode)
 	if m.OnSave != nil {
 		if err := m.OnSave(m.cfg); err != nil {
 			m.logf("❌ 热键注册失败: %s", err)
@@ -314,8 +437,10 @@ func (m *Model) View() string {
 			}
 		}
 		line := marker + lStyle.Render(f.label+": ") + m.renderField(i, f)
-		if m.helpVisible && f.help != "" {
-			line += " " + dStyle.Render("("+f.help+")")
+		if f.fType == fHotkey && m.capturing && m.captureKey == f.key {
+			line += "  " + wStyle.Render("[等待按键…]")
+		} else if m.helpVisible && f.help != "" {
+			line += " " + dStyle.Render("(" + f.help + ")")
 		}
 		b.WriteString(line + "\n")
 	}
@@ -344,7 +469,11 @@ func (m *Model) View() string {
 			b.WriteString("  " + dStyle.Render(l) + "\n")
 		}
 	}
-	b.WriteString(hStyle.Render("  j/k 导航 | e 编辑 | h 帮助 | esc 退出编辑 | s 保存 | q 退出"))
+	if m.capturing {
+		b.WriteString(hStyle.Render("  热键捕获中… 按下目标组合或 Esc 取消"))
+	} else {
+		b.WriteString(hStyle.Render("  j/k 导航 | e 编辑 | h 帮助 | esc 退出编辑 | s 保存 | q 退出"))
+	}
 	return b.String()
 }
 
@@ -448,10 +577,22 @@ func (m *Model) renderField(i int, f field) string {
 		if f.key == "access_key" && !editing && len(v) > 8 {
 			v = v[:8] + "***"
 		}
+		if f.key == "doubao_api_key" && !editing && len(v) > 8 {
+			v = v[:8] + "***"
+		}
 		if editing {
 			return f.input.View()
 		}
 		return vStyle.Render(v)
+	case fHotkey:
+		v := f.input.Value()
+		if editing {
+			if m.capturing && m.captureKey == f.key {
+				return wStyle.Render("按目标热键…") + "  " + dStyle.Render("(c 重录, Esc 取消)")
+			}
+			return f.input.View() + "  " + dStyle.Render("(c 录制)")
+		}
+		return vStyle.Render(v) + "  " + dStyle.Render("(e 编辑, c 录制)")
 	case fToggle:
 		if f.boolVal {
 			return aStyle.Render("● 开") + "  " + dStyle.Render("(空格)")
@@ -472,6 +613,9 @@ func (m *Model) logf(format string, args ...interface{}) {
 		return
 	}
 	m.logs = append(m.logs, fmt.Sprintf(format, args...))
+	if len(m.logs) > 200 {
+		m.logs = m.logs[len(m.logs)-100:]
+	}
 }
 
 func SetProviderInfo(info hotkey.ProviderInfo) tea.Cmd {
@@ -492,5 +636,3 @@ type refreshMsg struct{}
 func tickRefresh() tea.Cmd {
 	return tea.Tick(100*time.Millisecond, func(t time.Time) tea.Msg { return refreshMsg{} })
 }
-
-// Handle refreshMsg in Update

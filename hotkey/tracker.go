@@ -53,6 +53,12 @@ type KeyStateTracker struct {
 	// modifier-only trigger releases, it means the modifier was used in
 	// combination, not solo.
 	lastNonModKey KeyCode
+
+	// captureCh, when non-nil, receives one Combo per detected key press
+	// while capture mode is active. The tracker disables its watched-combo
+	// dispatch while a capture is in flight so the raw keyboard state is
+	// observable end-to-end. Providers should drain this channel promptly.
+	captureCh chan Combo
 }
 
 // NewKeyStateTracker creates a new KeyStateTracker.
@@ -64,6 +70,34 @@ func NewKeyStateTracker() *KeyStateTracker {
 		activeSoloCombos:     make(map[Combo]bool),
 		activeStandardCombos: make(map[Combo]bool),
 		soloWatch:            make(map[KeyCode]Combo),
+	}
+}
+
+// StartCapture arms the tracker so that every detected key-down emits a
+// Combo on the returned channel. The provider should call StopCapture when
+// done. Returns nil when a capture is already active.
+//
+// Capture mode is intentionally distinct from Watch: while capturing, the
+// tracker still tracks state normally but additionally surfaces every key
+// event. This lets the TUI let the user press any combo to assign it to a
+// setting (for example the voice hotkey).
+func (t *KeyStateTracker) StartCapture() chan Combo {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.captureCh != nil {
+		return nil
+	}
+	t.captureCh = make(chan Combo, 8)
+	return t.captureCh
+}
+
+// StopCapture disarms capture mode. Safe to call when not capturing.
+func (t *KeyStateTracker) StopCapture() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.captureCh != nil {
+		close(t.captureCh)
+		t.captureCh = nil
 	}
 }
 
@@ -124,6 +158,16 @@ func (t *KeyStateTracker) KeyDown(key KeyCode, now time.Time) []Event {
 		t.lastNonModKey = key
 	}
 
+	// Capture mode: surface every modifier+key press as a Combo, so the TUI
+	// can record whatever the user types without pre-registering it.
+	if t.captureCh != nil && !key.IsModifier() {
+		select {
+		case t.captureCh <- Combo{Mods: t.activeMods, Key: key}:
+		default:
+			// drop if the consumer is slow
+		}
+	}
+
 	// Check watched combos: standard modifier+key combos
 	if !key.IsModifier() {
 		combo := Combo{Mods: t.activeMods, Key: key}
@@ -179,6 +223,25 @@ func (t *KeyStateTracker) KeyUp(key KeyCode, now time.Time) []Event {
 		t.activeMods &^= mod
 	}
 
+	// Capture mode: surface a modifier-only release as its own Combo so the
+	// user can capture a bare-modifier hotkey (e.g. just pressing Ctrl).
+	if t.captureCh != nil && key.IsModifier() && t.activeMods == ModNone {
+		// Only emit if no non-modifier keys are still pressed.
+		hasNonMod := false
+		for k := range t.pressed {
+			if !k.IsModifier() {
+				hasNonMod = true
+				break
+			}
+		}
+		if !hasNonMod {
+			select {
+			case t.captureCh <- Combo{Mods: comboModsForKey(key), Key: KeyNone}:
+			default:
+			}
+		}
+	}
+
 	// Fire KeyUp for active standard combos as soon as any member of the
 	// combo is released. Hold-mode users expect recording to stop when they
 	// release either the character key or any required modifier.
@@ -220,6 +283,13 @@ func (t *KeyStateTracker) KeyUp(key KeyCode, now time.Time) []Event {
 	}
 
 	return events
+}
+
+// comboModsForKey returns the Modifier bit that a single modifier key
+// represents. Used by capture mode to convert a bare-modifier release
+// into a Combo{Mods: ..., Key: KeyNone}.
+func comboModsForKey(k KeyCode) Modifier {
+	return KeyCodeToModifier(k)
 }
 
 // ActiveMods returns the currently active modifier mask.

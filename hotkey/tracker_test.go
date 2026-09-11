@@ -58,3 +58,59 @@ func TestStandardComboKeyDownFiresWhenModifierPressedAfterKey(t *testing.T) {
 		t.Fatalf("Alt up emitted %d events, want 0", len(events))
 	}
 }
+
+func TestCaptureEmitsModifierPlusKey(t *testing.T) {
+	tracker := NewKeyStateTracker()
+	capture := tracker.StartCapture()
+	if capture == nil {
+		t.Fatal("StartCapture returned nil")
+	}
+	defer tracker.StopCapture()
+
+	tracker.KeyDown(KeyAlt, time.Now())
+	tracker.KeyDown(KeyF8, time.Now())
+
+	select {
+	case combo := <-capture:
+		if combo.Mods != ModAlt || combo.Key != KeyF8 {
+			t.Fatalf("captured %s, want Alt+F8", combo)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("capture did not emit Alt+F8 within 1s")
+	}
+}
+
+func TestCaptureEmitsBareModifier(t *testing.T) {
+	tracker := NewKeyStateTracker()
+	capture := tracker.StartCapture()
+	defer tracker.StopCapture()
+
+	tracker.KeyDown(KeyCtrl, time.Now())
+	tracker.KeyUp(KeyCtrl, time.Now())
+
+	select {
+	case combo := <-capture:
+		if combo.Mods != ModCtrl || combo.Key != KeyNone {
+			t.Fatalf("captured %s, want Ctrl", combo)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("capture did not emit bare Ctrl within 1s")
+	}
+}
+
+func TestCaptureSingleShot(t *testing.T) {
+	tracker := NewKeyStateTracker()
+	first := tracker.StartCapture()
+	if first == nil {
+		t.Fatal("first StartCapture returned nil")
+	}
+	if second := tracker.StartCapture(); second != nil {
+		t.Fatal("second StartCapture should return nil while one is in flight")
+	}
+	tracker.StopCapture()
+	if third := tracker.StartCapture(); third == nil {
+		t.Fatal("StartCapture after Stop should succeed")
+	}
+	tracker.StopCapture()
+	_ = first
+}

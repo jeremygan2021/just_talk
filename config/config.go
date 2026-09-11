@@ -14,6 +14,7 @@ type Config struct {
 	Voice   VoiceConfig   `toml:"voice"`
 	Debug   DebugConfig   `toml:"debug"`
 	Overlay OverlayConfig `toml:"overlay"`
+	LLM     LLMConfig     `toml:"llm"`
 }
 
 type DebugConfig struct {
@@ -29,18 +30,47 @@ type OverlayConfig struct {
 }
 
 type VoiceConfig struct {
-	Enabled     bool     `toml:"enabled"`
-	Mode        string   `toml:"mode"`
-	PushToTalk  string   `toml:"push_to_talk"`
-	Device      string   `toml:"device"`
-	Gain        int      `toml:"gain"`
-	StopDelayMs int      `toml:"stop_delay_ms"`
-	Language    string   `toml:"language"`
-	AutoSubmit  bool     `toml:"auto_submit"`
-	AppKey      string   `toml:"app_key"`
-	AccessKey   string   `toml:"access_key"`
-	ResourceID  string   `toml:"resource_id"`
-	Hotwords    []string `toml:"hotwords"`
+	Enabled     bool   `toml:"enabled"`
+	Mode        string `toml:"mode"`
+	PushToTalk  string `toml:"push_to_talk"`
+	Device      string `toml:"device"`
+	Gain        int    `toml:"gain"`
+	StopDelayMs int    `toml:"stop_delay_ms"`
+	Language    string `toml:"language"`
+	AutoSubmit  bool   `toml:"auto_submit"`
+	// ASRBackend selects the recognition engine: "online" (Doubao/Volcano
+	// streaming WebSocket, the default) or "offline" (local sherpa-onnx
+	// SenseVoice). The latter works with no network.
+	ASRBackend string `toml:"asr_backend"`
+	// OfflineModelDir optionally overrides the local SenseVoice model dir for
+	// offline mode. Empty uses asr_text.py's default (/root/sherpa-models/sense-voice).
+	OfflineModelDir string `toml:"offline_model_dir"`
+	// OfflineScript optionally points at the asr_text.py helper. Empty
+	// auto-discovers common locations.
+	OfflineScript string     `toml:"offline_script"`
+	AppKey        string     `toml:"app_key"`
+	AccessKey     string     `toml:"access_key"`
+	ResourceID    string     `toml:"resource_id"`
+	Hotwords      []string   `toml:"hotwords"`
+	// DoubaoAPIKey is the single-token credential used by the doubao_url
+	// backend (volc.seedasr.auc submit/query). It is separate from
+	// AppKey/AccessKey because the streaming WebSocket and the file-URL
+	// endpoint use different auth schemes.
+	DoubaoAPIKey     string `toml:"doubao_api_key"`
+	DoubaoResourceID string `toml:"doubao_resource_id"`
+}
+
+// LLMConfig configures an optional OpenAI-compatible chat backend used to
+// polish ASR output before it is pasted into the focused field. When
+// Enabled is false or any required field is empty, the voice plugin falls
+// back to dispatching the raw ASR text and surfaces a one-line warning.
+type LLMConfig struct {
+	Enabled      bool   `toml:"enabled"`
+	BaseURL      string `toml:"base_url"`
+	Model        string `toml:"model"`
+	APIKey       string `toml:"api_key"`
+	SystemPrompt string `toml:"system_prompt"`
+	TimeoutMs    int    `toml:"timeout_ms"`
 }
 
 func Default() *Config {
@@ -48,9 +78,20 @@ func Default() *Config {
 		Voice: VoiceConfig{
 			Enabled: true, Mode: "toggle", PushToTalk: "Alt+Super",
 			Language: "zh-CN", AutoSubmit: true, ResourceID: "volc.bigasr.sauc.duration",
+			ASRBackend: "online",
 		},
 		Overlay: OverlayConfig{
 			Enabled: true, Position: "bottom-center", IdleVisible: false, Scale: 1.0,
+		},
+		LLM: LLMConfig{
+			Enabled:   false,
+			BaseURL:   "https://api.openai.com/v1",
+			Model:     "gpt-4o-mini",
+			TimeoutMs: 8000,
+			SystemPrompt: "You rewrite ASR transcripts for a desktop voice-input tool. " +
+				"Fix obvious speech-recognition errors, remove filler words (um, uh, 嗯, 啊, 那个), " +
+				"and produce fluent written text in the same language as the input. " +
+				"Preserve the user's intent and named entities. Output only the rewritten text, no commentary.",
 		},
 	}
 }
@@ -185,6 +226,19 @@ func buildKeyNameMap() map[string]hotkey.KeyCode {
 	m["."] = hotkey.KeyPeriod
 	m["/"] = hotkey.KeySlash
 	return m
+}
+
+// NormalizeMode returns the recognized mode name and an empty error, or
+// ("", err) for unknown modes. Empty input defaults to "hold".
+func NormalizeMode(mode string) (string, error) {
+	switch mode {
+	case "", "hold":
+		return "hold", nil
+	case "toggle":
+		return "toggle", nil
+	default:
+		return "", fmt.Errorf("unknown voice mode %q (expected hold/toggle)", mode)
+	}
 }
 
 func ParseHotkey(s string) (hotkey.Combo, error) {

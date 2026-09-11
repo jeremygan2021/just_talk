@@ -110,6 +110,12 @@ func (c *ASRClient) LastText() string {
 	return c.lastText
 }
 
+// StartReceive launches the WebSocket receive loop, publishing ASRResult events.
+func (c *ASRClient) StartReceive(ctx context.Context) {
+	go c.ReceiveLoop(ctx)
+}
+
+// ReceiveLoop consumes the WebSocket and dispatches results/errors.
 func (c *ASRClient) ReceiveLoop(ctx context.Context) {
 	defer close(c.resultCh)
 	defer close(c.done)

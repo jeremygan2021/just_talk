@@ -139,6 +139,7 @@ func runTUI(eng *engine.Engine, cfg *config.Config, debug bool) {
 	model := tui.New(cfg)
 	model.SetDebug(debug)
 	model.OnSave = func(c *config.Config) error { return eng.ReloadConfig(c) }
+	model.OnCapture = func(ctx context.Context) (hotkey.Combo, error) { return eng.CaptureHotkey(ctx) }
 	go func() {
 		if err := eng.Start(false); err != nil && err != context.Canceled {
 			slog.Error("engine error", "error", err)

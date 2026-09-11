@@ -308,6 +308,24 @@ func (p *waylandProvider) Info() ProviderInfo {
 	}
 }
 
+// Capture listens for the next key combo the user presses and returns it.
+func (p *waylandProvider) Capture(ctx context.Context) (Combo, error) {
+	ch := p.tracker.StartCapture()
+	if ch == nil {
+		return Combo{}, fmt.Errorf("hotkey capture already in progress")
+	}
+	defer p.tracker.StopCapture()
+	select {
+	case combo, ok := <-ch:
+		if !ok {
+			return Combo{}, fmt.Errorf("hotkey capture channel closed")
+		}
+		return combo, nil
+	case <-ctx.Done():
+		return Combo{}, ctx.Err()
+	}
+}
+
 // findKeyboardDevices scans /dev/input/event* for keyboard devices.
 func findKeyboardDevices() ([]string, error) {
 	entries, err := os.ReadDir("/dev/input/")

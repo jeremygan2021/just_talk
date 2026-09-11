@@ -173,6 +173,14 @@ func (e *Engine) Wait() {
 	e.wg.Wait()
 }
 
+// CaptureHotkey blocks until the user presses a key combo or the supplied
+// context is cancelled. It is intended for the TUI: a user navigates to the
+// hotkey field, presses the capture key, and the function returns the next
+// detected combo for the field to display.
+func (e *Engine) CaptureHotkey(ctx context.Context) (hotkey.Combo, error) {
+	return e.provider.Capture(ctx)
+}
+
 func (e *Engine) handleSignals() {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)

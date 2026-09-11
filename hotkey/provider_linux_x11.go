@@ -136,6 +136,10 @@ type x11Provider struct {
 	// Pipe for signaling the event loop to stop
 	stopFd int
 
+	// keyState mirrors the keyboard state for capture mode and lets us emit
+	// consistent Combo values from X11 modifier masks.
+	keyState *KeyStateTracker
+
 	logger *slog.Logger
 }
 
@@ -155,6 +159,7 @@ func newX11Provider() (Provider, error) {
 		pressedKeys:  make(map[uint]bool),
 		activeCombos: make(map[Combo]bool),
 		grabbedKeys:  make(map[uint]bool),
+		keyState:     NewKeyStateTracker(),
 		logger:       slog.Default().With("platform", "x11"),
 	}, nil
 }
@@ -333,6 +338,15 @@ func (p *x11Provider) handleKeyEvent(event *C.XEvent, isRelease bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
+	// Feed the shared key-state tracker so capture mode (and future
+	// modifier-only detection) sees every key event regardless of whether
+	// any combo matches.
+	if isRelease {
+		p.keyState.KeyUp(key, now)
+	} else {
+		p.keyState.KeyDown(key, now)
+	}
+
 	// Check registered combos
 	for combo, ch := range p.channels {
 		if isRelease {
@@ -414,6 +428,24 @@ func (p *x11Provider) Info() ProviderInfo {
 			// Note: modifier-only support is limited on X11 (see comboMatches)
 			FeatureModifierOnly,
 		},
+	}
+}
+
+// Capture listens for the next key combo the user presses and returns it.
+func (p *x11Provider) Capture(ctx context.Context) (Combo, error) {
+	ch := p.keyState.StartCapture()
+	if ch == nil {
+		return Combo{}, fmt.Errorf("hotkey capture already in progress")
+	}
+	defer p.keyState.StopCapture()
+	select {
+	case combo, ok := <-ch:
+		if !ok {
+			return Combo{}, fmt.Errorf("hotkey capture channel closed")
+		}
+		return combo, nil
+	case <-ctx.Done():
+		return Combo{}, ctx.Err()
 	}
 }
 
