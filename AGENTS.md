@@ -14,6 +14,9 @@ This project uses native platform APIs and requires cgo for supported desktop bu
 
 ```bash
 make build              # Build for the current platform
+make icons              # Generate the .desktop launcher icon (needs ImageMagick)
+make install-desktop    # Install .desktop file + icon to ~/.local/share/applications and ~/Desktop
+make uninstall-desktop  # Remove the .desktop file + icon
 make run                # Run on the current platform
 make test               # Run all tests
 go test ./...           # Faster default test command
@@ -27,7 +30,7 @@ Useful runtime commands:
 
 ```bash
 just-talk               # TUI mode, default
-just-talk --no-tui      # daemon mode
+just-talk --no-tui      # daemon mode (also runs the tray icon)
 just-talk --doctor      # startup environment check
 just-talk --backend x11
 just-talk --backend wayland
@@ -62,7 +65,7 @@ cmd/just-talk/main.go
   -> doctor.Run
   -> hotkey.NewProvider
   -> engine.New
-  -> load voice + overlay plugins
+  -> load voice + overlay + (daemon only) tray plugins
   -> TUI or daemon mode
 ```
 
@@ -72,10 +75,13 @@ Core packages:
 - `engine/`: plugin lifecycle and config reload orchestration.
 - `plugins/voice/`: recorder, ASR streaming, hotkey behavior, clipboard/auto-submit dispatch, stats.
 - `plugins/overlay/`: recording status capsule for Linux and macOS.
+- `plugins/tray/`: system tray indicator (Linux/macOS daemon mode), with menu actions and status icon.
 - `internal/autotype/`: platform paste/auto-submit implementation.
 - `internal/clipboard/`: platform clipboard implementation.
 - `internal/doctor/`: startup environment checks.
 - `internal/tui/`: Bubble Tea configuration UI.
+
+The daemon mode holds a `flock(2)` lock at `$XDG_RUNTIME_DIR/just-talk/just-talk.lock` (falling back to `~/.cache/just-talk/`); a second launch is rejected so that hotkeys and `/dev/input/event*` access are never contended.
 
 ## Hotkey Notes
 

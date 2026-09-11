@@ -96,6 +96,43 @@ just-talk --backend wayland
 just-talk --backend x11
 ```
 
+### Tray Icon And Desktop Integration
+
+When launched from the desktop, Just Talk runs as a background daemon (no terminal window) and shows a status icon in the system tray (top-right of the panel). The icon color reflects the current voice state:
+
+| State | Icon |
+| --- | --- |
+| Idle | Grey |
+| Connecting to ASR | Yellow |
+| Recording | Red |
+| Finalizing / stopping | Orange |
+| Double- / triple-tap gesture | Green / orange arrow |
+| Error | Dark red |
+
+Right-click the tray icon for:
+
+- **Show TUI** — open the configuration UI in a new terminal window (a separate process; the daemon keeps running).
+- **Open Config** — open `~/.config/just-talk/config.toml` with the default app.
+- **Open Config Dir** — open the configuration directory.
+- **Quit** — cleanly stop the daemon.
+
+Install the desktop launcher and icon:
+
+```bash
+# Build the binary and the launcher icon
+make build icons
+
+# Install the .desktop file and icon
+make install-desktop
+
+# Uninstall
+make uninstall-desktop
+```
+
+After install, "Just Talk" appears in the application menu, and a launcher is placed on `~/Desktop`. The daemon uses a single-instance lock, so launching it again is rejected instead of contending with the running instance for global hotkeys.
+
+> The previous `~/.config/systemd/user/just-talk.service` autostart unit has been removed. Use the desktop icon for on-demand launching. To restore autostart, add a systemd `user` `Wants=` reference, or drop a startup script under `~/.config/autostart/`.
+
 ## Configuration
 
 Default config path:

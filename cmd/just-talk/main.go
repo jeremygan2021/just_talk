@@ -17,6 +17,7 @@ import (
 	"github.com/c/just-talk-go/internal/tui"
 	"github.com/c/just-talk-go/plugins"
 	"github.com/c/just-talk-go/plugins/overlay"
+	"github.com/c/just-talk-go/plugins/tray"
 	"github.com/c/just-talk-go/plugins/voice"
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -114,6 +115,9 @@ func main() {
 	}
 	eng.LoadPlugin(voice.NewVoicePlugin())
 	eng.LoadPlugin(overlay.NewOverlayPlugin())
+	if !*useTUI {
+		eng.LoadPlugin(tray.NewTrayPlugin())
+	}
 	if p := config.FindConfig(); p != "" {
 		eng.WatchConfig(p)
 	}
@@ -126,7 +130,13 @@ func main() {
 }
 
 func runDaemon(eng *engine.Engine) {
-	slog.Info("just-talk started — press hotkeys, Ctrl+C to quit")
+	lock, err := acquireSingleton()
+	if err != nil {
+		slog.Error("refusing to start", "error", err)
+		os.Exit(1)
+	}
+	defer lock.Release()
+	slog.Info("just-talk started — use tray icon or Ctrl+C to quit")
 	if err := eng.Start(true); err != nil && err != context.Canceled {
 		slog.Error("engine exited with error", "error", err)
 		os.Exit(1)

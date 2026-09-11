@@ -96,6 +96,43 @@ just-talk --backend wayland
 just-talk --backend x11
 ```
 
+### 桌面图标与系统托盘
+
+桌面点击启动后会以**后台模式**运行（无终端窗口），并在系统托盘（右上角工具栏）显示运行状态图标。图标颜色随录音状态变化：
+
+| 状态 | 图标颜色 |
+| --- | --- |
+| 空闲 | 灰色 |
+| 连接 ASR | 黄色 |
+| 录音中 | 红色 |
+| 等待停止 / 收尾 | 橙色 |
+| 双击 / 三击手势 | 绿 / 橙（箭头） |
+| 出错 | 深红 |
+
+托盘右键菜单：
+
+- **Show TUI** — 在新终端窗口中打开配置界面（独立进程，不影响后台 daemon）。
+- **Open Config** — 用默认应用打开 `~/.config/just-talk/config.toml`。
+- **Open Config Dir** — 打开配置目录。
+- **Quit** — 干净退出 daemon。
+
+安装桌面图标和 .desktop 文件：
+
+```bash
+# 先编译二进制和图标
+make build icons
+
+# 安装到 ~/.local/share/applications/ 和 ~/Desktop/
+make install-desktop
+
+# 卸载
+make uninstall-desktop
+```
+
+安装后，可以在应用菜单搜索 "Just Talk"，或直接双击桌面上的快捷方式。后台 daemon 有单实例锁，二次启动会被拒绝（不会和已经在跑的 daemon 抢全局热键）。
+
+> 以前的 `~/.config/systemd/user/just-talk.service` 自启方式已被移除。改用桌面图标按需启动；想恢复自启可以加 systemd `user` unit 的 `Wants=` 引用，或直接放一个启动脚本到 `~/.config/autostart/`。
+
 ## 配置
 
 默认配置路径：

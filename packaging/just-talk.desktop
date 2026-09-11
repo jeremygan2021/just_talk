@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Just Talk
+GenericName=Voice Input
+Comment=Desktop voice input — press hotkey to dictate, text goes to clipboard or focused field
+Exec=__EXEC_PATH__ --no-tui
+Icon=__ICON_PATH__
+Terminal=false
+Categories=Utility;AudioVideo;
+StartupNotify=false
+StartupWMClass=just-talk
+Keywords=voice;speech;dictation;asr;transcription;
+MimeType=text/plain;
