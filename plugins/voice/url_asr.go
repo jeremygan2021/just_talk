@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -207,7 +208,14 @@ func (c *URLASRClient) submit(ctx context.Context, reqID, wavB64 string) error {
 	status := resp.Header.Get("X-Api-Status-Code")
 	msg := resp.Header.Get("X-Api-Message")
 	if resp.StatusCode != http.StatusOK || (status != "" && status != "20000000") {
-		return fmt.Errorf("submit http %d status=%s msg=%s body=%s", resp.StatusCode, status, msg, string(raw))
+		body := strings.TrimSpace(string(raw))
+		if len(body) > 256 {
+			body = body[:256] + "..."
+		}
+		if status == "" && resp.StatusCode != http.StatusOK {
+			return fmt.Errorf("submit http %d (no X-Api-Status-Code) msg=%s body=%s", resp.StatusCode, msg, body)
+		}
+		return fmt.Errorf("submit http %d status=%s msg=%s body=%s", resp.StatusCode, status, msg, body)
 	}
 	return nil
 }
@@ -230,7 +238,11 @@ func (c *URLASRClient) query(ctx context.Context, reqID string) (string, error) 
 	if resp.StatusCode != http.StatusOK {
 		status := resp.Header.Get("X-Api-Status-Code")
 		msg := resp.Header.Get("X-Api-Message")
-		return "", fmt.Errorf("query http %d status=%s msg=%s body=%s", resp.StatusCode, status, msg, string(raw))
+		body := strings.TrimSpace(string(raw))
+		if len(body) > 256 {
+			body = body[:256] + "..."
+		}
+		return "", fmt.Errorf("query http %d status=%s msg=%s body=%s", resp.StatusCode, status, msg, body)
 	}
 	var parsed struct {
 		AudioInfo struct {
@@ -264,10 +276,7 @@ func (c *URLASRClient) buildRequest() map[string]interface{} {
 	}
 	if len(c.cfg.Hotwords) > 0 {
 		if ctx, err := hotwordsContext(c.cfg.Hotwords); err == nil && ctx != "" {
-			var parsed map[string]interface{}
-			if json.Unmarshal([]byte(ctx), &parsed) == nil {
-				r["corpus"] = parsed
-			}
+			r["corpus"] = map[string]interface{}{"context": ctx}
 		}
 	}
 	if c.cfg.Language != "" && c.cfg.Language != "zh-CN" {
